@@ -1,67 +1,52 @@
-export interface Env {
-  DB: D1Database;
-}
+import type { Env } from "./env";
+import { HttpError, html, json, redirect } from "./lib/http";
+import { getAuth } from "./lib/auth";
+import { health } from "./routes/health";
+import { login, logout, me, signup } from "./routes/auth";
+import { appPage, loginPage, signupPage } from "./pages";
 
-const VERSION = "0.1.0-phase1";
+export type { Env };
 
-const REQUIRED_TABLES = [
-  "companies",
-  "users",
-  "sessions",
-  "connectors",
-  "devices",
-  "employees",
-  "sync_jobs",
-  "attendance_logs",
-];
+async function route(request: Request, env: Env): Promise<Response> {
+  const { pathname } = new URL(request.url);
+  const method = request.method;
 
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data, null, 2), {
-    status,
-    headers: { "content-type": "application/json; charset=utf-8" },
-  });
-}
+  // ---- API
+  if (pathname === "/api/health" && method === "GET") return health(env);
+  if (pathname === "/api/auth/signup" && method === "POST") return signup(request, env);
+  if (pathname === "/api/auth/login" && method === "POST") return login(request, env);
+  if (pathname === "/api/auth/logout" && method === "POST") return logout(request, env);
+  if (pathname === "/api/auth/me" && method === "GET") return me(request, env);
+  if (pathname.startsWith("/api/")) return json({ error: "Not found" }, 404);
 
-async function checkSchema(db: D1Database) {
-  const { results } = await db
-    .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
-    .all<{ name: string }>();
-  const existing = new Set((results ?? []).map((r) => r.name));
-  const missing = REQUIRED_TABLES.filter((t) => !existing.has(t));
-  return { ok: missing.length === 0, tables: REQUIRED_TABLES.length - missing.length, missing };
+  // ---- Pages
+  if (method === "GET") {
+    if (pathname === "/") {
+      return redirect((await getAuth(request, env)) ? "/app" : "/login");
+    }
+    if (pathname === "/login") {
+      return (await getAuth(request, env)) ? redirect("/app") : html(loginPage());
+    }
+    if (pathname === "/signup") {
+      return (await getAuth(request, env)) ? redirect("/app") : html(signupPage(Boolean(env.SIGNUP_CODE)));
+    }
+    if (pathname === "/app") {
+      const auth = await getAuth(request, env);
+      return auth ? html(appPage(auth)) : redirect("/login");
+    }
+  }
+
+  return json({ error: "Not found" }, 404);
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-
-    if (url.pathname === "/api/health") {
-      try {
-        const ping = await env.DB.prepare("SELECT 1 AS ok").first<{ ok: number }>();
-        const schema = await checkSchema(env.DB);
-        const healthy = ping?.ok === 1 && schema.ok;
-        return json(
-          {
-            status: healthy ? "ok" : "degraded",
-            version: VERSION,
-            d1: ping?.ok === 1 ? "connected" : "unknown",
-            schema: schema.ok ? "ready" : "missing tables",
-            tables: `${schema.tables}/${REQUIRED_TABLES.length}`,
-            missing: schema.missing,
-          },
-          healthy ? 200 : 503,
-        );
-      } catch (err) {
-        return json({ status: "error", version: VERSION, d1: "failed", error: String(err) }, 500);
-      }
+    try {
+      return await route(request, env);
+    } catch (err) {
+      if (err instanceof HttpError) return json({ error: err.message }, err.status);
+      console.error(err);
+      return json({ error: "Internal server error" }, 500);
     }
-
-    if (url.pathname === "/") {
-      return new Response(`HR Auto Attendance Fetcher - ${VERSION}`, {
-        headers: { "content-type": "text/plain; charset=utf-8" },
-      });
-    }
-
-    return json({ error: "Not found" }, 404);
   },
 };
