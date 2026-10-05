@@ -3,20 +3,50 @@ import { HttpError, html, json, redirect } from "./lib/http";
 import { getAuth } from "./lib/auth";
 import { health } from "./routes/health";
 import { login, logout, me, signup } from "./routes/auth";
+import {
+  createConnector, createDevice, deactivateDevice, listConnectors,
+  listDevices, listSyncJobs, queueSync, revokeConnector,
+} from "./routes/manage";
+import { claimJob, completeJob, connectorConfig, uploadLogs } from "./routes/connector";
 import { appPage, loginPage, signupPage } from "./pages";
 
 export type { Env };
 
+const ID = "([0-9a-f-]{36})";
+const R_CONNECTOR_REVOKE = new RegExp(`^/api/connectors/${ID}/revoke$`);
+const R_DEVICE_DEACTIVATE = new RegExp(`^/api/devices/${ID}/deactivate$`);
+const R_DEVICE_SYNC = new RegExp(`^/api/devices/${ID}/sync$`);
+const R_JOB_LOGS = new RegExp(`^/api/connector/jobs/${ID}/logs$`);
+const R_JOB_COMPLETE = new RegExp(`^/api/connector/jobs/${ID}/complete$`);
+
 async function route(request: Request, env: Env): Promise<Response> {
   const { pathname } = new URL(request.url);
   const method = request.method;
+  let m: RegExpExecArray | null;
 
-  // ---- API
+  // ---- Public / auth
   if (pathname === "/api/health" && method === "GET") return health(env);
   if (pathname === "/api/auth/signup" && method === "POST") return signup(request, env);
   if (pathname === "/api/auth/login" && method === "POST") return login(request, env);
   if (pathname === "/api/auth/logout" && method === "POST") return logout(request, env);
   if (pathname === "/api/auth/me" && method === "GET") return me(request, env);
+
+  // ---- Dashboard API (browser session)
+  if (pathname === "/api/connectors" && method === "GET") return listConnectors(request, env);
+  if (pathname === "/api/connectors" && method === "POST") return createConnector(request, env);
+  if (method === "POST" && (m = R_CONNECTOR_REVOKE.exec(pathname))) return revokeConnector(request, env, m[1]);
+  if (pathname === "/api/devices" && method === "GET") return listDevices(request, env);
+  if (pathname === "/api/devices" && method === "POST") return createDevice(request, env);
+  if (method === "POST" && (m = R_DEVICE_DEACTIVATE.exec(pathname))) return deactivateDevice(request, env, m[1]);
+  if (method === "POST" && (m = R_DEVICE_SYNC.exec(pathname))) return queueSync(request, env, m[1]);
+  if (pathname === "/api/sync-jobs" && method === "GET") return listSyncJobs(request, env);
+
+  // ---- ZKT Connector API (Bearer token)
+  if (pathname === "/api/connector/config" && method === "GET") return connectorConfig(request, env);
+  if (pathname === "/api/connector/jobs/claim" && method === "POST") return claimJob(request, env);
+  if (method === "POST" && (m = R_JOB_LOGS.exec(pathname))) return uploadLogs(request, env, m[1]);
+  if (method === "POST" && (m = R_JOB_COMPLETE.exec(pathname))) return completeJob(request, env, m[1]);
+
   if (pathname.startsWith("/api/")) return json({ error: "Not found" }, 404);
 
   // ---- Pages
