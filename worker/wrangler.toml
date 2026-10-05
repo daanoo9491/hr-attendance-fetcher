@@ -1,0 +1,9 @@
+name = "hr-attendance-fetcher"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "hr-attendance"
+database_id = "b3516d31-21a4-47a9-a066-0d2f71b42bad"
+migrations_dir = "migrations"
