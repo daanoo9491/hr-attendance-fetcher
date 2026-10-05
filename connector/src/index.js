@@ -1,30 +1,64 @@
+// ZKT Connector main loop.
+//   npm start                 -> runs continuously: picks up sync jobs and imports attendance
+//   npm start -- --once       -> processes at most one pending job, then exits
 import "dotenv/config";
 import { CONNECTOR_VERSION, clientFromEnv } from "./api.js";
+import { processJob } from "./sync.js";
+import { log } from "./log.js";
 
-async function main() {
-  console.log(`ZKT Connector ${CONNECTOR_VERSION}`);
-  console.log(`API : ${process.env.API_BASE_URL ?? "(not set)"}`);
+const once = process.argv.includes("--once");
+const pollSeconds = Math.min(Math.max(Number(process.env.POLL_INTERVAL_SECONDS) || 60, 15), 3600);
+const timeoutMs = Number(process.env.DEVICE_TIMEOUT_MS) || 10000;
 
-  if (!process.env.API_BASE_URL) {
-    console.log("API_BASE_URL not set - copy .env.example to .env first.");
-    return;
-  }
+let stopping = false;
+process.on("SIGINT", () => {
+  if (stopping) process.exit(1);
+  stopping = true;
+  log.info("Stopping after the current step (press Ctrl+C again to force)...");
+});
+process.on("SIGTERM", () => { stopping = true; });
 
-  try {
-    const res = await fetch(`${process.env.API_BASE_URL.replace(/\/+$/, "")}/api/health`);
-    const health = await res.json();
-    console.log(`Worker: ${health.status} (${health.version})`);
-
-    const config = await clientFromEnv().getConfig();
-    console.log(`Connector: ${config.connector.name}`);
-    if (!config.devices.length) console.log("Devices: none assigned yet");
-    for (const d of config.devices) {
-      console.log(`Device: ${d.name}  ${d.ip_address}:${d.port}  comm key ${d.comm_key}`);
-    }
-  } catch (err) {
-    console.error("Error:", err.message);
-    process.exitCode = 1;
-  }
+async function sleepUnlessStopping(seconds) {
+  for (let i = 0; i < seconds && !stopping; i++) await new Promise((r) => setTimeout(r, 1000));
 }
 
-main();
+async function main() {
+  log.info(`ZKT Connector ${CONNECTOR_VERSION} starting${once ? " (single run)" : ""}`);
+  const api = clientFromEnv();
+
+  const config = await api.getConfig();
+  log.info(`Connected to ${api.baseUrl} as connector "${config.connector.name}"`);
+  if (!config.devices.length) log.warn("No devices assigned to this connector yet (add one in the dashboard).");
+  for (const d of config.devices) log.info(`Device "${d.name}" at ${d.ip_address}:${d.port}`);
+  if (!once) log.info(`Checking for sync jobs every ${pollSeconds} s. Press Ctrl+C to stop.`);
+
+  while (!stopping) {
+    try {
+      const { job } = await api.claimJob();
+      if (job) {
+        await processJob(api, job, { timeoutMs });
+        if (once) break;
+        continue; // another job may be waiting (e.g. several devices)
+      }
+      if (once) {
+        log.info("No pending sync job. Click 'Sync now' in the dashboard, then run again.");
+        break;
+      }
+    } catch (err) {
+      if (err.status === 401) {
+        log.error(`${err.message}. Create a new connector token in the dashboard and update .env.`);
+        process.exitCode = 1;
+        return;
+      }
+      log.error(`Could not reach the server: ${err.message}`);
+      if (once) { process.exitCode = 1; return; }
+    }
+    await sleepUnlessStopping(pollSeconds);
+  }
+  log.info("Connector stopped.");
+}
+
+main().catch((err) => {
+  log.error(err.message);
+  process.exitCode = 1;
+});

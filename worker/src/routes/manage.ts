@@ -79,7 +79,7 @@ export async function listDevices(request: Request, env: Env): Promise<Response>
   const { results } = await env.DB.prepare(
     `SELECT d.id, d.name, d.model, d.ip_address, d.port, d.comm_key, d.serial_number,
             d.connector_id, c.name AS connector_name, c.is_active AS connector_active,
-            d.last_sync_at, d.is_active, d.created_at,
+            d.last_sync_at, d.clock_offset_seconds, d.clock_checked_at, d.is_active, d.created_at,
             (SELECT COUNT(*) FROM attendance_logs l WHERE l.device_id = d.id) AS log_count,
             (SELECT j.status FROM sync_jobs j WHERE j.device_id = d.id ORDER BY j.requested_at DESC LIMIT 1) AS last_job_status
        FROM devices d
@@ -173,7 +173,7 @@ export async function listSyncJobs(request: Request, env: Env): Promise<Response
   const limit = Math.min(Math.max(Number(new URL(request.url).searchParams.get("limit")) || 20, 1), 100);
   const { results } = await env.DB.prepare(
     `SELECT j.id, j.device_id, d.name AS device_name, j.trigger_type, j.status,
-            j.requested_at, j.started_at, j.finished_at, j.records_fetched, j.records_inserted, j.error_message
+            j.requested_at, j.started_at, j.finished_at, j.records_fetched, j.records_inserted, j.records_skipped, j.error_message
        FROM sync_jobs j JOIN devices d ON d.id = j.device_id
       WHERE j.company_id = ?
       ORDER BY j.requested_at DESC

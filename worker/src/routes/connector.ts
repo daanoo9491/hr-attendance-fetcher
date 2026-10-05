@@ -176,22 +176,34 @@ export async function completeJob(request: Request, env: Env, jobId: string): Pr
   const serial = typeof body.device_serial === "string" && body.device_serial.trim()
     ? body.device_serial.trim().slice(0, 64)
     : null;
+  const skipped = Number.isInteger(body.records_skipped) && (body.records_skipped as number) >= 0
+    ? (body.records_skipped as number)
+    : 0;
+  const clockOffset = Number.isInteger(body.clock_offset_seconds) && Math.abs(body.clock_offset_seconds as number) < 20 * 365 * 86400
+    ? (body.clock_offset_seconds as number)
+    : null;
 
   const now = new Date().toISOString();
   const statements = [
-    env.DB.prepare("UPDATE sync_jobs SET status = ?, finished_at = ?, error_message = ? WHERE id = ?")
-      .bind(status, now, errorMessage, job.id),
+    env.DB.prepare("UPDATE sync_jobs SET status = ?, finished_at = ?, error_message = ?, records_skipped = ? WHERE id = ?")
+      .bind(status, now, errorMessage, skipped, job.id),
   ];
   if (status === "success") {
     statements.push(
-      env.DB.prepare("UPDATE devices SET last_sync_at = ?, serial_number = COALESCE(?, serial_number) WHERE id = ?")
-        .bind(now, serial, job.device_id),
+      env.DB.prepare(
+        `UPDATE devices
+            SET last_sync_at = ?, serial_number = COALESCE(?, serial_number),
+                clock_offset_seconds = COALESCE(?, clock_offset_seconds),
+                clock_checked_at = CASE WHEN ? IS NULL THEN clock_checked_at ELSE ? END
+          WHERE id = ?`,
+      ).bind(now, serial, clockOffset, clockOffset, now, job.device_id),
     );
   }
   await env.DB.batch(statements);
 
   const summary = await env.DB.prepare(
-    "SELECT id, status, records_fetched, records_inserted, finished_at, error_message FROM sync_jobs WHERE id = ?",
+    `SELECT id, status, records_fetched, records_inserted, records_skipped, finished_at, error_message
+       FROM sync_jobs WHERE id = ?`,
   ).bind(job.id).first();
   return json({ job: summary });
 }

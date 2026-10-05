@@ -43,6 +43,7 @@ table { width:100%; border-collapse:collapse; font-size:13px; }
 th, td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--border); white-space:nowrap; }
 th { color:var(--muted); font-weight:500; }
 td.err { white-space:normal; color:var(--error); max-width:280px; }
+td.warn { color:#b26b00; }
 .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid var(--border); }
 .b-success, .b-active { color:#1a7f37; border-color:#1a7f37; }
 .b-failed, .b-revoked, .b-inactive { color:var(--error); border-color:var(--error); }
@@ -180,7 +181,7 @@ export function appPage(auth: AuthContext): string {
     </div>
     <div class="msg" id="d_msg"></div>
     <div class="tbl"><table>
-      <thead><tr><th>Name</th><th>Address</th><th>Connector</th><th>Serial</th><th>Last sync</th><th>Logs</th><th>Last job</th><th></th></tr></thead>
+      <thead><tr><th>Name</th><th>Address</th><th>Connector</th><th>Serial</th><th>Clock</th><th>Last sync</th><th>Logs</th><th>Last job</th><th></th></tr></thead>
       <tbody id="d_rows"></tbody>
     </table></div>
   </div>
@@ -189,7 +190,7 @@ export function appPage(auth: AuthContext): string {
     <h2>3. Sync jobs</h2>
     <p class="sub">Each import run. The connector picks up pending jobs and uploads the machine's attendance logs.</p>
     <div class="tbl"><table>
-      <thead><tr><th>Requested</th><th>Device</th><th>Trigger</th><th>Status</th><th>Fetched</th><th>New</th><th>Finished</th><th>Error</th></tr></thead>
+      <thead><tr><th>Requested</th><th>Device</th><th>Trigger</th><th>Status</th><th>Read</th><th>New</th><th>Skipped</th><th>Finished</th><th>Error</th></tr></thead>
       <tbody id="j_rows"></tbody>
     </table></div>
   </div>
@@ -213,6 +214,15 @@ function when(v) { return v ? new Date(v).toLocaleString() : "\\u2014"; }
 function td(text, cls) { var c = document.createElement("td"); c.textContent = (text === null || text === undefined || text === "") ? "\\u2014" : String(text); if (cls) c.className = cls; return c; }
 function badge(text) { var c = document.createElement("td"); if (!text) { c.textContent = "\\u2014"; return c; } var s = document.createElement("span"); s.className = "badge b-" + text; s.textContent = text; c.appendChild(s); return c; }
 function btn(label, primary, onClick) { var b = document.createElement("button"); b.type = "button"; b.className = primary ? "sm primary" : "sm"; b.textContent = label; b.addEventListener("click", onClick); return b; }
+function clockCell(sec) {
+  var c = document.createElement("td");
+  if (sec === null || sec === undefined) { c.textContent = "\\u2014"; return c; }
+  var a = Math.abs(sec);
+  var txt = a < 60 ? a + " s" : a < 3600 ? Math.round(a / 60) + " min" : a < 86400 ? (a / 3600).toFixed(1) + " h" : Math.round(a / 86400) + " days";
+  c.textContent = a <= 60 ? "OK" : (sec < 0 ? txt + " slow" : txt + " fast");
+  if (a > 60) { c.className = "warn"; c.title = "The machine clock is off. Correct the time on the machine so punches are recorded at the right time."; }
+  return c;
+}
 function emptyRow(tbody, cols, text) { var tr = document.createElement("tr"); var c = document.createElement("td"); c.colSpan = cols; c.className = "empty"; c.textContent = text; tr.appendChild(c); tbody.appendChild(tr); }
 function showMsg(id, text) { document.getElementById(id).textContent = text || ""; }
 
@@ -249,13 +259,14 @@ async function loadDevices() {
   var data = await api("GET", "/api/devices");
   var tbody = document.getElementById("d_rows");
   tbody.textContent = "";
-  if (!data.devices.length) emptyRow(tbody, 8, "No devices yet.");
+  if (!data.devices.length) emptyRow(tbody, 9, "No devices yet.");
   data.devices.forEach(function (d) {
     var tr = document.createElement("tr");
     tr.appendChild(td(d.name + (d.is_active ? "" : " (inactive)")));
     tr.appendChild(td(d.ip_address + ":" + d.port));
     tr.appendChild(td(d.connector_name));
     tr.appendChild(td(d.serial_number));
+    tr.appendChild(clockCell(d.clock_offset_seconds));
     tr.appendChild(td(when(d.last_sync_at)));
     tr.appendChild(td(d.log_count));
     tr.appendChild(badge(d.last_job_status));
@@ -282,15 +293,16 @@ async function loadJobs() {
   var data = await api("GET", "/api/sync-jobs?limit=20");
   var tbody = document.getElementById("j_rows");
   tbody.textContent = "";
-  if (!data.jobs.length) emptyRow(tbody, 8, "No sync jobs yet.");
+  if (!data.jobs.length) emptyRow(tbody, 9, "No sync jobs yet.");
   data.jobs.forEach(function (j) {
     var tr = document.createElement("tr");
     tr.appendChild(td(when(j.requested_at)));
     tr.appendChild(td(j.device_name));
     tr.appendChild(td(j.trigger_type));
     tr.appendChild(badge(j.status));
-    tr.appendChild(td(j.records_fetched));
+    tr.appendChild(td(j.records_fetched + (j.records_skipped || 0)));
     tr.appendChild(td(j.records_inserted));
+    tr.appendChild(td(j.records_skipped, j.records_skipped ? "warn" : ""));
     tr.appendChild(td(when(j.finished_at)));
     tr.appendChild(td(j.error_message, j.error_message ? "err" : ""));
     tbody.appendChild(tr);
