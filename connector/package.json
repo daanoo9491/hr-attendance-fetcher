@@ -1,11 +1,14 @@
 {
   "name": "zkt-connector",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "api-test": "node src/api-test.js"
+    "api-test": "node src/api-test.js",
+    "read-device": "node src/read-device.js",
+    "mock-device": "node test/mock-device.js",
+    "test": "node --test test/zk.test.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5"
