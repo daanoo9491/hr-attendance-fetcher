@@ -1,6 +1,6 @@
 {
   "name": "hr-attendance-worker",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "private": true,
   "scripts": {
     "bundle-connector": "node scripts/bundle-connector.mjs",

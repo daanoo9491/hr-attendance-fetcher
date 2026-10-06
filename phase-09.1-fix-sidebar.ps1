@@ -1,3 +1,60 @@
+# =====================================================================
+# HR Auto Attendance Fetcher - PHASE 9.1 : fix notices appearing in the
+# sidebar after the dashboard refreshes. Run from the ROOT of the repo:
+#   powershell -ExecutionPolicy Bypass -File .\phase-09.1-fix-sidebar.ps1
+# =====================================================================
+$ErrorActionPreference = "Stop"
+
+function Write-File([string]$Path, [string]$Content) {
+    $full = Join-Path (Get-Location) $Path
+    $dir  = Split-Path $full -Parent
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    [System.IO.File]::WriteAllText($full, $Content.Replace("`r`n", "`n"), (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "  wrote $Path" -ForegroundColor Green
+}
+
+if (-not (Test-Path "worker/src/routes/overview.ts")) {
+    throw "Run this from the repo root, after Phase 9 (worker/src/routes/overview.ts not found)."
+}
+
+Write-Host "Phase 9.1: fixing the sidebar..." -ForegroundColor Cyan
+
+# ---------------------------------------------------------------- worker/package.json
+Write-File "worker/package.json" @'
+{
+  "name": "hr-attendance-worker",
+  "version": "0.9.1",
+  "private": true,
+  "scripts": {
+    "bundle-connector": "node scripts/bundle-connector.mjs",
+    "dev": "npm run bundle-connector && wrangler dev",
+    "deploy": "npm run bundle-connector && wrangler deploy",
+    "typecheck": "npm run bundle-connector && tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261001.1",
+    "typescript": "^5.6.0",
+    "wrangler": "^4.0.0"
+  }
+}
+'@
+
+# ---------------------------------------------------------------- worker/src/env.ts
+Write-File "worker/src/env.ts" @'
+export interface Env {
+  DB: D1Database;
+  /** Optional. When set, sign-up requires this code (set with: wrangler secret put SIGNUP_CODE). */
+  SIGNUP_CODE?: string;
+}
+
+export const VERSION = "0.9.1-phase9";
+
+/** Number of files in worker/migrations. The health check reports "degraded" until all are applied. */
+export const EXPECTED_MIGRATIONS = 5;
+'@
+
+# ---------------------------------------------------------------- worker/src/pages.ts
+Write-File "worker/src/pages.ts" @'
 import { VERSION } from "./env";
 import type { AuthContext } from "./lib/auth";
 import { escapeHtml } from "./lib/http";
@@ -1067,3 +1124,7 @@ setInterval(function () {
   if (ovDate === ovToday) quiet(loadOverview());
 }, 20000);
 </script>`;
+'@
+
+Write-Host ""
+Write-Host "Phase 9.1 files written. Deploy with: cd worker; npm run deploy" -ForegroundColor Cyan
