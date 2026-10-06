@@ -1,5 +1,5 @@
 // HTTP client for the Attendance Fetcher Worker (connector side).
-export const CONNECTOR_VERSION = "0.6.0";
+export const CONNECTOR_VERSION = "0.7.0";
 
 export class ApiClient {
   constructor(baseUrl, token) {
@@ -45,6 +45,11 @@ export class ApiClient {
   /** records: [{ user_id, timestamp: "YYYY-MM-DD HH:MM:SS", state, verify_mode }] (max 1000 per call) */
   uploadLogs(jobId, records) {
     return this.request("POST", `/api/connector/jobs/${encodeURIComponent(jobId)}/logs`, { records });
+  }
+
+  /** users: [{ user_id, name }] from the machine's user list */
+  uploadUsers(jobId, users) {
+    return this.request("POST", `/api/connector/jobs/${encodeURIComponent(jobId)}/users`, { users });
   }
 
   /** payload: { status: "success" | "failed", error_message?, device_serial? } */

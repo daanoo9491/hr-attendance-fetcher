@@ -2,8 +2,8 @@
 // READ_ONLY_COMMANDS, so this client cannot clear logs or change the machine.
 import net from "node:net";
 import {
-  CMD, READ_ONLY_COMMANDS, USHRT_MAX,
-  buildFrame, makeCommKey, parseFrames, parseAttendance, decodeTime,
+  CMD, READ_ONLY_COMMANDS, READ_ONLY_DATASETS, USHRT_MAX,
+  buildFrame, makeCommKey, parseFrames, parseAttendance, parseUsers, decodeTime,
 } from "./protocol.js";
 
 const MAX_CHUNK = 0xffc0; // max bytes per READ_BUFFER request over TCP
@@ -156,10 +156,13 @@ export class ZkClient {
   }
 
   async readWithBuffer(dataCommand, onProgress) {
+    if (!READ_ONLY_DATASETS.has(dataCommand)) {
+      throw new Error(`Blocked: dataset ${dataCommand} is not on the read-only allowlist`);
+    }
     const req = Buffer.alloc(11);
     req.writeInt8(1, 0);
     req.writeInt16LE(dataCommand, 1);
-    req.writeInt32LE(0, 3);
+    req.writeInt32LE(READ_ONLY_DATASETS.get(dataCommand), 3);
     req.writeInt32LE(0, 7);
     const res = await this.command(CMD.PREPARE_BUFFER, req);
 
@@ -182,12 +185,20 @@ export class ZkClient {
   }
 
   /** Reads every attendance record stored on the machine. Nothing is deleted. */
-  async getAttendance(onProgress) {
-    const sizes = await this.getSizes();
-    if (sizes.records <= 0) return { sizes, recordSize: 0, records: [] };
+  async getAttendance(onProgress, sizes) {
+    const s = sizes ?? (await this.getSizes());
+    if (s.records <= 0) return { sizes: s, recordSize: 0, records: [] };
     const buffer = await this.readWithBuffer(CMD.ATTLOG_RRQ, onProgress);
-    const { recordSize, records } = parseAttendance(buffer, sizes.records);
-    return { sizes, recordSize, records };
+    const { recordSize, records } = parseAttendance(buffer, s.records);
+    return { sizes: s, recordSize, records };
+  }
+
+  /** Reads the user list (user ID + name only). */
+  async getUsers(sizes) {
+    const s = sizes ?? (await this.getSizes());
+    if (s.users <= 0) return [];
+    const buffer = await this.readWithBuffer(CMD.USERTEMP_RRQ);
+    return parseUsers(buffer, s.users).users;
   }
 
   async disconnect() {
@@ -204,15 +215,40 @@ export class ZkClient {
   }
 }
 
-/** Connect, read everything we need, always disconnect. */
+/**
+ * Connect, read everything we need, always disconnect.
+ * The user list is optional: if the machine refuses it, attendance is still returned
+ * (usersError explains why the names are missing).
+ */
 export async function readDevice(options, onProgress) {
   const client = new ZkClient(options);
   try {
     await client.connect();
     const serialNumber = await client.getSerialNumber();
     const deviceTime = await client.getTime();
-    const { sizes, recordSize, records } = await client.getAttendance(onProgress);
-    return { serialNumber, deviceTime, sizes, recordSize, records };
+    const sizes = await client.getSizes();
+
+    let users = [];
+    let usersError = null;
+    try {
+      users = await client.getUsers(sizes);
+    } catch (err) {
+      usersError = err.message;
+    }
+
+    const { recordSize, records } = await client.getAttendance(onProgress, sizes);
+
+    // Old 8-byte records only store the machine's internal number: map it to the user ID.
+    if (recordSize === 8 && users.length) {
+      const byUid = new Map(users.map((u) => [String(u.uid), u.user_id]));
+      for (const r of records) r.user_id = byUid.get(r.user_id) ?? r.user_id;
+    }
+
+    return {
+      serialNumber, deviceTime, sizes, recordSize, records,
+      users: users.map((u) => ({ user_id: u.user_id, name: u.name })),
+      usersError,
+    };
   } finally {
     await client.disconnect();
   }

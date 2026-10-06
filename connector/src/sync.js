@@ -120,7 +120,19 @@ export async function processJob(api, job, { timeoutMs = 10000 } = {}) {
     return { ok: false, error: msg };
   }
 
-  // 3) Complete
+  // 3) Employee names from the machine (best effort: never fails the sync)
+  if (result.users.length) {
+    try {
+      const res = await withRetry("Uploading names", () => api.uploadUsers(job.id, result.users));
+      log.info(`Names: ${result.users.length} users on machine, ${res.named} with a name (${res.added} new employees)`);
+    } catch (err) {
+      log.warn(`Could not upload employee names: ${err.message}`);
+    }
+  } else if (result.usersError) {
+    log.warn(`Could not read user names from the machine: ${result.usersError}`);
+  }
+
+  // 4) Complete
   try {
     await withRetry("Completing job", () => api.completeJob(job.id, {
       status: "success",

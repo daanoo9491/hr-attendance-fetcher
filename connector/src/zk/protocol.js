@@ -3,6 +3,7 @@
 // public pyzk / zkemsdk implementations.
 
 export const CMD = Object.freeze({
+  USERTEMP_RRQ: 9,       // read user list (with FCT_USER)
   OPTIONS_RRQ: 11,       // read a device option, e.g. ~SerialNumber
   ATTLOG_RRQ: 13,        // read all attendance records
   GET_FREE_SIZES: 50,    // read record counts / capacity
@@ -29,6 +30,13 @@ export const READ_ONLY_COMMANDS = new Set([
   CMD.CONNECT, CMD.EXIT, CMD.AUTH,
   CMD.GET_FREE_SIZES, CMD.OPTIONS_RRQ, CMD.GET_TIME,
   CMD.PREPARE_BUFFER, CMD.READ_BUFFER, CMD.FREE_DATA,
+]);
+
+/** Datasets the connector may read through PREPARE_BUFFER: attendance log and user list only. */
+export const FCT_USER = 5;
+export const READ_ONLY_DATASETS = new Map([
+  [CMD.ATTLOG_RRQ, 0],
+  [CMD.USERTEMP_RRQ, FCT_USER],
 ]);
 
 export const USHRT_MAX = 65535;
@@ -177,4 +185,28 @@ export function parseAttendance(buffer, recordCount) {
     }
   }
   return { recordSize, records };
+}
+
+/**
+ * Parses the user list. Only the user ID and name are kept; passwords and
+ * card numbers stored on the machine are never read out of the buffer.
+ * Record layout: 72 bytes (TFT devices such as K40/K50) or 28 bytes (old models).
+ */
+export function parseUsers(buffer, userCount) {
+  if (buffer.length < 4 || userCount <= 0) return { recordSize: 0, users: [] };
+  const total = buffer.readUInt32LE(0);
+  const body = buffer.subarray(4, 4 + total);
+  const recordSize = total / userCount === 28 ? 28 : 72;
+  const text = (b) => b.toString("utf8").split("\0")[0].replace(/\uFFFD/g, "").trim();
+
+  const users = [];
+  for (let off = 0; off + recordSize <= body.length; off += recordSize) {
+    const r = body.subarray(off, off + recordSize);
+    if (recordSize === 72) {
+      users.push({ uid: r.readUInt16LE(0), user_id: text(r.subarray(48, 72)) || String(r.readUInt16LE(0)), name: text(r.subarray(11, 35)) });
+    } else {
+      users.push({ uid: r.readUInt16LE(0), user_id: String(r.readUInt32LE(24)), name: text(r.subarray(8, 16)) });
+    }
+  }
+  return { recordSize, users };
 }

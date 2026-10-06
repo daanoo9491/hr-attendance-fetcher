@@ -212,3 +212,68 @@ export async function completeJob(request: Request, env: Env, jobId: string): Pr
   ).bind(job.id).first();
   return json({ job: summary });
 }
+
+// ------------------------------------------------------------------ POST /api/connector/jobs/:id/users
+const MAX_USERS_PER_UPLOAD = 5000;
+const USER_ID_RE = /^[A-Za-z0-9_.-]{1,32}$/;
+
+/**
+ * Receives the machine's user list ({ users: [{ user_id, name }] }).
+ * New user IDs become employees; the machine name is stored and shown in
+ * reports unless someone has edited that employee's name in the dashboard.
+ */
+export async function uploadUsers(request: Request, env: Env, jobId: string): Promise<Response> {
+  const ctx = await requireConnector(request, env);
+  const job = await loadOwnJob(env, ctx, jobId);
+  if (job.status !== "running") throw new HttpError(409, `Job is ${job.status}, not running`);
+
+  const body = await readJson<{ users?: unknown }>(request);
+  if (!Array.isArray(body.users)) throw new HttpError(400, "Body must be { users: [...] }");
+  if (body.users.length > MAX_USERS_PER_UPLOAD) throw new HttpError(413, `Send at most ${MAX_USERS_PER_UPLOAD} users`);
+
+  const clean = new Map<string, string>();
+  for (const raw of body.users) {
+    if (!raw || typeof raw !== "object") continue;
+    const u = raw as Record<string, unknown>;
+    const id = String(u.user_id ?? "").trim();
+    if (!USER_ID_RE.test(id)) continue;
+    const name = typeof u.name === "string"
+      ? u.name.replace(/[\u0000-\u001f\u007f]/g, "").replace(/\s+/g, " ").trim().slice(0, 80)
+      : "";
+    clean.set(id, name);
+  }
+  const rows = [...clean].map(([u, n]) => ({ u, n }));
+  if (!rows.length) return json({ received: body.users.length, accepted: 0, named: 0, added: 0 });
+
+  const before = await env.DB.prepare("SELECT COUNT(*) AS n FROM employees WHERE company_id = ?")
+    .bind(job.company_id).first<{ n: number }>();
+
+  // A blank name on the machine never wipes a name we already have.
+  await env.DB.prepare(
+    `INSERT INTO employees (id, company_id, device_user_id, full_name, machine_name, updated_at)
+     SELECT lower(hex(randomblob(16))), ?1, json_extract(value, '$.u'),
+            json_extract(value, '$.n'), NULLIF(json_extract(value, '$.n'), ''), ?2
+       FROM json_each(?3) WHERE true
+     ON CONFLICT (company_id, device_user_id) DO UPDATE SET
+       machine_name = COALESCE(excluded.machine_name, employees.machine_name),
+       full_name    = CASE
+                        WHEN employees.name_edited = 1 THEN employees.full_name
+                        WHEN excluded.machine_name IS NOT NULL THEN excluded.machine_name
+                        ELSE employees.full_name
+                      END,
+       updated_at   = CASE
+                        WHEN COALESCE(excluded.machine_name, '') <> COALESCE(employees.machine_name, '') THEN excluded.updated_at
+                        ELSE employees.updated_at
+                      END`,
+  ).bind(job.company_id, new Date().toISOString(), JSON.stringify(rows)).run();
+
+  const after = await env.DB.prepare("SELECT COUNT(*) AS n FROM employees WHERE company_id = ?")
+    .bind(job.company_id).first<{ n: number }>();
+
+  return json({
+    received: body.users.length,
+    accepted: rows.length,
+    named: rows.filter((r) => r.n).length,
+    added: (after?.n ?? 0) - (before?.n ?? 0),
+  });
+}

@@ -1,7 +1,7 @@
 // Run: npm test   (uses the mock device, no hardware needed)
 import test from "node:test";
 import assert from "node:assert/strict";
-import { startMockDevice, sampleRecords } from "./mock-device.js";
+import { startMockDevice, sampleRecords, sampleUsers } from "./mock-device.js";
 import { ZkClient, readDevice } from "../src/zk/client.js";
 import { READ_ONLY_COMMANDS, decodeTime, encodeTime } from "../src/zk/protocol.js";
 
@@ -16,7 +16,11 @@ async function withMock(options, fn) {
 
 function assertReadOnly(received) {
   for (const c of received) {
-    assert.ok(READ_ONLY_COMMANDS.has(c), `non read-only command sent to device: ${c}`);
+    if (typeof c === "string") {
+      assert.ok(c === "buffer:13" || c === "buffer:9", `unexpected dataset requested: ${c}`);
+    } else {
+      assert.ok(READ_ONLY_COMMANDS.has(c), `non read-only command sent to device: ${c}`);
+    }
   }
 }
 
@@ -94,3 +98,53 @@ test("unreachable device fails with a clear message", async () => {
     /Cannot (connect|reach)/,
   );
 });
+
+test("user list: names read (72-byte), no passwords or card numbers", () =>
+  withMock({ records: sampleRecords(100) }, async (mock) => {
+    const r = await readDevice({ ip: "127.0.0.1", port: mock.port, timeoutMs: 3000 });
+    assert.equal(r.users.length, 25);
+    const expected = sampleUsers(mock.records)[0];
+    assert.deepEqual(r.users[0], { user_id: expected.user_id, name: expected.name });
+    for (const u of r.users) assert.deepEqual(Object.keys(u).sort(), ["name", "user_id"]);
+    assertReadOnly(mock.received);
+  }));
+
+test("user list: 28-byte format and blank / non-English names", () => {
+  const records = sampleRecords(20);
+  const users = sampleUsers(records);
+  users[0].name = "";
+  users[1].name = "\u0639\u0644\u06cc"; // Urdu "Ali"
+  return withMock({ records, users, userRecordSize: 28 }, async (mock) => {
+    const r = await readDevice({ ip: "127.0.0.1", port: mock.port, timeoutMs: 3000 });
+    assert.equal(r.users[0].name, "");
+    assert.equal(r.users[1].name, "\u0639\u0644\u06cc");
+  });
+});
+
+test("machine refuses user list: attendance still returned", () =>
+  withMock({ records: sampleRecords(30), refuseUsers: true }, async (mock) => {
+    const r = await readDevice({ ip: "127.0.0.1", port: mock.port, timeoutMs: 3000 });
+    assert.equal(r.records.length, 30);
+    assert.equal(r.users.length, 0);
+    assert.match(r.usersError, /buffered reads/);
+  }));
+
+test("8-byte records are mapped from internal number to user ID", () => {
+  const records = sampleRecords(40);
+  const users = sampleUsers(records).map((u) => ({ ...u, user_id: String(1000 + u.uid) }));
+  // In the 8-byte format the machine stores its internal number (uid), not the user ID.
+  const byId = new Map(sampleUsers(records).map((u) => [u.user_id, u.uid]));
+  const stored = records.map((r) => ({ ...r, user_id: String(byId.get(r.user_id)) }));
+  return withMock({ records: stored, recordSize: 8, users }, async (mock) => {
+    const r = await readDevice({ ip: "127.0.0.1", port: mock.port, timeoutMs: 3000 });
+    assert.ok(r.records.every((x) => Number(x.user_id) > 1000));
+  });
+});
+
+test("other datasets (e.g. fingerprints) are blocked", () =>
+  withMock({ records: sampleRecords(5) }, async (mock) => {
+    const c = new ZkClient({ ip: "127.0.0.1", port: mock.port, timeoutMs: 3000 });
+    await c.connect();
+    await assert.rejects(c.readWithBuffer(1503), /read-only allowlist/);
+    await c.disconnect();
+  }));

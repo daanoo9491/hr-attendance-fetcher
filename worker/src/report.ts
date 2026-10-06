@@ -53,7 +53,7 @@ export async function attendanceStats(env: Env, companyId: string, from: string,
 export async function buildAttendanceReport(env: Env, ctx: ReportContext, from: string, to: string) {
   const { results } = await env.DB.prepare(
     `SELECT l.device_user_id, l.punch_time, l.punch_state, l.verify_mode,
-            d.name AS device_name, e.full_name, e.department
+            d.name AS device_name, NULLIF(e.full_name, '') AS full_name, NULLIF(e.department, '') AS department
        FROM attendance_logs l
        JOIN devices d ON d.id = l.device_id
        LEFT JOIN employees e ON e.company_id = l.company_id AND e.device_user_id = l.device_user_id
@@ -126,7 +126,7 @@ export async function buildAttendanceReport(env: Env, ctx: ReportContext, from: 
     [bold("Total punches"), punches.length],
     ["", ""],
     [bold("Notes"), "A day runs 00:00-23:59. Hours = Last Out - First In (breaks are not deducted)."],
-    ["", "Names and departments appear once employees are mapped to machine user IDs."],
+    ["", "Names come from the machine's user list or the Employees page of the dashboard."],
     ...(ctx.notes ?? []).map((n) => ["", n] as CellValue[]),
   ];
 

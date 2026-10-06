@@ -26,6 +26,38 @@ export function sampleRecords(count, startDay = "2026-09-01") {
   return out;
 }
 
+/** Users for the mock: one per distinct user ID in the records, named "Employee <id>". */
+export function sampleUsers(records) {
+  const ids = [...new Set(records.map((r) => r.user_id))];
+  return ids.map((id, i) => ({ uid: i + 1, user_id: id, name: `Employee ${id}`, password: "1234", card: 99887766 }));
+}
+
+export function encodeUsers(users, recordSize = 72) {
+  const body = Buffer.alloc(users.length * recordSize);
+  users.forEach((u, i) => {
+    const o = i * recordSize;
+    if (recordSize === 72) {
+      body.writeUInt16LE(u.uid, o);
+      body.writeUInt8(0, o + 2);
+      body.write(u.password ?? "", o + 3, 8, "utf8");
+      body.write(u.name ?? "", o + 11, 24, "utf8");
+      body.writeUInt32LE(u.card ?? 0, o + 35);
+      body.write("1", o + 40, 7, "utf8");
+      body.write(u.user_id, o + 48, 24, "utf8");
+    } else {
+      body.writeUInt16LE(u.uid, o);
+      body.write(u.password ?? "", o + 3, 5, "utf8");
+      body.write(u.name ?? "", o + 8, 8, "utf8");
+      body.writeUInt32LE(u.card ?? 0, o + 16);
+      body.writeUInt8(1, o + 21);
+      body.writeUInt32LE(Number(u.user_id), o + 24);
+    }
+  });
+  const total = Buffer.alloc(4);
+  total.writeUInt32LE(body.length, 0);
+  return Buffer.concat([total, body]);
+}
+
 export function encodeRecords(records, recordSize = 40) {
   const body = Buffer.alloc(records.length * recordSize);
   records.forEach((r, i) => {
@@ -54,7 +86,7 @@ export function encodeRecords(records, recordSize = 40) {
 }
 
 /**
- * options: { records, recordSize=40, commKey=0, directLimit=1024, dataFrameSize=Infinity, serial }
+ * options: { records, recordSize=40, users, userRecordSize=72, refuseUsers, commKey=0, directLimit=1024, dataFrameSize=Infinity, serial }
  * Returns { server, port, received } - received lists every command code the client sent.
  */
 export function startMockDevice(options = {}) {
@@ -64,6 +96,8 @@ export function startMockDevice(options = {}) {
   const directLimit = options.directLimit ?? 1024;
   const dataFrameSize = options.dataFrameSize ?? Infinity; // real devices send each chunk as one DATA packet
   const serial = options.serial ?? "MOCK0000K50";
+  const users = options.users ?? sampleUsers(records);
+  const userRecordSize = options.userRecordSize ?? 72;
   const received = [];
   const SESSION = 0x2a3b;
 
@@ -94,7 +128,7 @@ export function startMockDevice(options = {}) {
           out.push(reply(CMD.ACK_UNAUTH, f.replyId));
         } else if (f.command === CMD.GET_FREE_SIZES) {
           const d = Buffer.alloc(92);
-          d.writeInt32LE(25, 4 * 4);
+          d.writeInt32LE(users.length, 4 * 4);
           d.writeInt32LE(50, 6 * 4);
           d.writeInt32LE(records.length, 8 * 4);
           d.writeInt32LE(100000, 16 * 4);
@@ -105,11 +139,18 @@ export function startMockDevice(options = {}) {
           const d = Buffer.alloc(4);
           d.writeUInt32LE(encodeTime("2026-10-05 20:30:00"), 0);
           out.push(reply(CMD.ACK_OK, f.replyId, d));
-        } else if (f.command === CMD.PREPARE_BUFFER && f.data.readInt16LE(1) !== CMD.ATTLOG_RRQ) {
-          received.push(`buffer:${f.data.readInt16LE(1)}`);
-          out.push(reply(CMD.ACK_ERROR, f.replyId)); // only the attendance log is served
         } else if (f.command === CMD.PREPARE_BUFFER) {
-          buffered = encodeRecords(records, recordSize);
+          const dataset = f.data.readInt16LE(1);
+          received.push(`buffer:${dataset}`);
+          if (dataset === CMD.ATTLOG_RRQ) {
+            buffered = encodeRecords(records, recordSize);
+          } else if (dataset === CMD.USERTEMP_RRQ && f.data.readInt32LE(3) === 5 && !options.refuseUsers) {
+            buffered = encodeUsers(users, userRecordSize);
+          } else {
+            out.push(reply(CMD.ACK_ERROR, f.replyId));
+            sock.write(Buffer.concat(out));
+            continue;
+          }
           if (buffered.length <= directLimit) {
             out.push(reply(CMD.DATA, f.replyId, buffered));
           } else {

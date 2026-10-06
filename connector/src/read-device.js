@@ -91,6 +91,15 @@ async function main() {
   console.log(`Stored       : ${sizes.records} punches (capacity ${sizes.recordsCapacity || "?"}), ${sizes.users} users, record format ${result.recordSize || "-"} bytes`);
   console.log(`Read         : ${records.length} punches in ${seconds} s`);
 
+  if (result.users.length) {
+    const named = result.users.filter((u) => u.name);
+    console.log(`Names        : ${named.length} of ${result.users.length} users have a name on the machine`);
+    for (const u of result.users.slice(0, 10)) console.log(`  user ${u.user_id.padEnd(8)} ${u.name || "(no name on machine)"}`);
+    if (result.users.length > 10) console.log(`  ... and ${result.users.length - 10} more`);
+  } else if (result.usersError) {
+    console.log(`Names        : could not read user list (${result.usersError})`);
+  }
+
   if (!records.length) {
     console.log("\nThe machine has no attendance records.");
     return;
@@ -114,7 +123,7 @@ async function main() {
     fs.writeFileSync(file, toCsv(sorted));
     console.log(`\nSaved ${sorted.length} punches to ${file}`);
   }
-  console.log("\nNothing was uploaded. Uploading to the dashboard comes in Phase 5.");
+  console.log("\nNothing was uploaded (this command only reads). Use \"npm start\" or Sync now to import.");
 }
 
 main().catch((err) => {

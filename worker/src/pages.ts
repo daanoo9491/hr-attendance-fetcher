@@ -54,6 +54,8 @@ a.dl { display:inline-block; text-decoration:none; border-radius:8px; }
 .token code { display:block; margin:8px 0; padding:8px; background:var(--bg); border-radius:6px; word-break:break-all; font-size:13px; }
 .empty { color:var(--muted); font-size:13px; padding:10px 0; }
 .dash .msg { margin-top:8px; min-height:0; }
+.sm.primary:disabled { opacity:.3; }
+input.cell { padding:6px 8px; border:1px solid var(--border); border-radius:6px; background:var(--bg); color:var(--text); font-size:13px; width:100%; min-width:140px; }
 `;
 
 function layout(title: string, body: string): string {
@@ -171,6 +173,16 @@ export function appPage(auth: AuthContext): string {
   </div>
 
   <div class="card">
+    <h2>Employees</h2>
+    <p class="sub" id="e_sub">Names are read from the machine's user list on every sync. Type a name here to override it, or leave it blank to use the machine's name.</p>
+    <div class="tbl"><table>
+      <thead><tr><th>User ID</th><th>Name</th><th>Department</th><th>Name source</th><th>Last punch</th><th></th></tr></thead>
+      <tbody id="e_rows"></tbody>
+    </table></div>
+    <div class="msg" id="e_msg"></div>
+  </div>
+
+  <div class="card">
     <h2>1. Connectors</h2>
     <p class="sub">A connector is the ZKT Connector app on an office PC that can reach the machine. Its token goes into connector/.env.</p>
     <div class="row"${hide}>
@@ -276,6 +288,65 @@ async function loadReports() {
   });
 }
 
+var empEditing = false;
+
+function input(value, placeholder, maxLength) {
+  var i = document.createElement("input");
+  i.value = value || "";
+  i.placeholder = placeholder || "";
+  i.maxLength = maxLength;
+  i.className = "cell";
+  return i;
+}
+
+async function loadEmployees() {
+  if (empEditing) return; // don't wipe what someone is typing
+  var data = await api("GET", "/api/employees");
+  document.getElementById("e_sub").textContent =
+    data.total + " employee(s), " + data.unnamed + " without a name. Names are read from the machine's user list on every sync. " +
+    (CAN_MANAGE ? "Type a name to override it, or leave it blank to use the machine's name." : "");
+  var tbody = document.getElementById("e_rows");
+  tbody.textContent = "";
+  if (!data.employees.length) emptyRow(tbody, 6, "No employees yet. They appear after the first sync.");
+  data.employees.forEach(function (e) {
+    var tr = document.createElement("tr");
+    tr.appendChild(td(e.user_id));
+    var source = e.name_edited ? "Edited" : (e.machine_name ? "Machine" : "");
+    if (!CAN_MANAGE) {
+      tr.appendChild(td(e.name, e.name ? "" : "warn"));
+      tr.appendChild(td(e.department));
+      tr.appendChild(td(source));
+      tr.appendChild(td(e.last_punch));
+      tr.appendChild(document.createElement("td"));
+      tbody.appendChild(tr);
+      return;
+    }
+    var nameIn = input(e.name_edited ? e.name : "", e.machine_name || "Enter name", 80);
+    var deptIn = input(e.department, "Department", 60);
+    var c1 = document.createElement("td"); c1.appendChild(nameIn); tr.appendChild(c1);
+    var c2 = document.createElement("td"); c2.appendChild(deptIn); tr.appendChild(c2);
+    tr.appendChild(td(source, source ? "" : "warn"));
+    tr.appendChild(td(e.last_punch));
+    var save = btn("Save", true, async function () {
+      save.disabled = true;
+      try {
+        await api("PUT", "/api/employees/" + encodeURIComponent(e.user_id), { name: nameIn.value, department: deptIn.value });
+        showMsg("e_msg", "");
+        empEditing = false;
+        await loadEmployees();
+      } catch (err) { showMsg("e_msg", err.message); save.disabled = false; }
+    });
+    save.disabled = true;
+    var orig = nameIn.value + "|" + deptIn.value;
+    [nameIn, deptIn].forEach(function (el) {
+      el.addEventListener("input", function () { save.disabled = (nameIn.value + "|" + deptIn.value) === orig; empEditing = !save.disabled; });
+      el.addEventListener("keydown", function (ev) { if (ev.key === "Enter" && !save.disabled) save.click(); });
+    });
+    var c3 = document.createElement("td"); c3.appendChild(save); tr.appendChild(c3);
+    tbody.appendChild(tr);
+  });
+}
+
 async function loadConnectors() {
   var data = await api("GET", "/api/connectors");
   var tbody = document.getElementById("c_rows");
@@ -360,7 +431,7 @@ async function loadJobs() {
 }
 
 async function refresh() {
-  try { await Promise.all([loadReports(), loadConnectors(), loadDevices(), loadJobs()]); }
+  try { await Promise.all([loadReports(), loadEmployees(), loadConnectors(), loadDevices(), loadJobs()]); }
   catch (err) { showMsg("d_msg", err.message); }
 }
 

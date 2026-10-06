@@ -7,7 +7,8 @@ import {
   createConnector, createDevice, deactivateDevice, listConnectors,
   listDevices, listSyncJobs, queueSync, revokeConnector,
 } from "./routes/manage";
-import { claimJob, completeJob, connectorConfig, uploadLogs } from "./routes/connector";
+import { claimJob, completeJob, connectorConfig, uploadLogs, uploadUsers } from "./routes/connector";
+import { listEmployees, saveEmployee } from "./routes/employees";
 import { downloadReport, exportRange, listReports } from "./routes/reports";
 import { runScheduler } from "./scheduler";
 import { appPage, loginPage, signupPage } from "./pages";
@@ -21,6 +22,16 @@ const R_DEVICE_SYNC = new RegExp(`^/api/devices/${ID}/sync$`);
 const R_JOB_LOGS = new RegExp(`^/api/connector/jobs/${ID}/logs$`);
 const R_JOB_COMPLETE = new RegExp(`^/api/connector/jobs/${ID}/complete$`);
 const R_REPORT_DOWNLOAD = new RegExp(`^/api/reports/${ID}/download$`);
+const R_JOB_USERS = new RegExp(`^/api/connector/jobs/${ID}/users$`);
+const R_EMPLOYEE = /^\/api\/employees\/([^/]{1,100})$/;
+
+function safeDecode(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    throw new HttpError(400, "Invalid URL");
+  }
+}
 
 async function route(request: Request, env: Env): Promise<Response> {
   const { pathname } = new URL(request.url);
@@ -46,11 +57,14 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (pathname === "/api/reports" && method === "GET") return listReports(request, env);
   if (method === "GET" && (m = R_REPORT_DOWNLOAD.exec(pathname))) return downloadReport(request, env, m[1]);
   if (pathname === "/api/export.xlsx" && method === "GET") return exportRange(request, env);
+  if (pathname === "/api/employees" && method === "GET") return listEmployees(request, env);
+  if (method === "PUT" && (m = R_EMPLOYEE.exec(pathname))) return saveEmployee(request, env, safeDecode(m[1]));
 
   // ---- ZKT Connector API (Bearer token)
   if (pathname === "/api/connector/config" && method === "GET") return connectorConfig(request, env);
   if (pathname === "/api/connector/jobs/claim" && method === "POST") return claimJob(request, env);
   if (method === "POST" && (m = R_JOB_LOGS.exec(pathname))) return uploadLogs(request, env, m[1]);
+  if (method === "POST" && (m = R_JOB_USERS.exec(pathname))) return uploadUsers(request, env, m[1]);
   if (method === "POST" && (m = R_JOB_COMPLETE.exec(pathname))) return completeJob(request, env, m[1]);
 
   if (pathname.startsWith("/api/")) return json({ error: "Not found" }, 404);
