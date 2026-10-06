@@ -181,3 +181,25 @@ export async function listSyncJobs(request: Request, env: Env): Promise<Response
   ).bind(auth.companyId, limit).all();
   return json({ jobs: results ?? [] });
 }
+
+/** POST /api/devices/sync-all - queue a manual sync for every active device that has an active connector. */
+export async function syncAll(request: Request, env: Env): Promise<Response> {
+  const auth = await requireAuth(request, env);
+  requireRole(auth, ["owner", "admin"]);
+  const { results } = await env.DB.prepare(
+    `SELECT d.id,
+            (SELECT 1 FROM sync_jobs j WHERE j.device_id = d.id AND j.status IN ('pending','running') LIMIT 1) AS open
+       FROM devices d JOIN connectors c ON c.id = d.connector_id
+      WHERE d.company_id = ? AND d.is_active = 1 AND c.is_active = 1`,
+  ).bind(auth.companyId).all<{ id: string; open: number | null }>();
+
+  const devices = results ?? [];
+  const toQueue = devices.filter((d) => !d.open);
+  if (toQueue.length) {
+    await env.DB.batch(toQueue.map((d) =>
+      env.DB.prepare(
+        "INSERT INTO sync_jobs (id, company_id, device_id, trigger_type, status) VALUES (?, ?, ?, 'manual', 'pending')",
+      ).bind(crypto.randomUUID(), auth.companyId, d.id)));
+  }
+  return json({ devices: devices.length, queued: toQueue.length, already_queued: devices.length - toQueue.length });
+}

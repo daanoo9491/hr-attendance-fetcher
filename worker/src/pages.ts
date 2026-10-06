@@ -54,6 +54,13 @@ a.dl { display:inline-block; text-decoration:none; border-radius:8px; }
 .token code { display:block; margin:8px 0; padding:8px; background:var(--bg); border-radius:6px; word-break:break-all; font-size:13px; }
 .empty { color:var(--muted); font-size:13px; padding:10px 0; }
 .dash .msg { margin-top:8px; min-height:0; }
+.alert { padding:12px 14px; border-radius:10px; margin-bottom:10px; font-size:14px; border:1px solid; }
+.a-error { color:var(--error); border-color:var(--error); }
+.a-warning { color:#b26b00; border-color:#b26b00; }
+.a-info { color:var(--muted); border-color:var(--border); }
+ol.steps { margin:8px 0 12px; padding-left:20px; font-size:14px; line-height:1.6; }
+.token details { margin-top:12px; font-size:13px; color:var(--muted); }
+.token summary { cursor:pointer; }
 .sm.primary:disabled { opacity:.3; }
 input.cell { padding:6px 8px; border:1px solid var(--border); border-radius:6px; background:var(--bg); color:var(--text); font-size:13px; width:100%; min-width:140px; }
 `;
@@ -157,6 +164,8 @@ export function appPage(auth: AuthContext): string {
     <button id="logout" type="button">Sign out</button>
   </div>
 
+  <div id="alerts"></div>
+
   <div class="card">
     <h2>Attendance reports</h2>
     <p class="sub" id="r_sched">Every 2 days an Excel report of the previous 2 days is prepared automatically.</p>
@@ -168,6 +177,7 @@ export function appPage(auth: AuthContext): string {
       <div class="f" style="flex:0 1 170px"><label for="x_from">Custom export from</label><input id="x_from" type="date"></div>
       <div class="f" style="flex:0 1 170px"><label for="x_to">to</label><input id="x_to" type="date"></div>
       <button id="x_go" type="button">Download Excel</button>
+      <button id="sync_all" type="button" class="sm"${hide} style="margin-left:auto">Sync all machines now</button>
     </div>
     <div class="msg" id="x_msg"></div>
   </div>
@@ -184,7 +194,7 @@ export function appPage(auth: AuthContext): string {
 
   <div class="card">
     <h2>1. Connectors</h2>
-    <p class="sub">A connector is the ZKT Connector app on an office PC that can reach the machine. Its token goes into connector/.env.</p>
+    <p class="sub">The ZKT Connector runs on a Windows PC on the same network as the machine and sends its attendance here. Create one, click <b>Download installer</b>, extract the ZIP on that PC and double-click <b>Install.cmd</b>. It is already set up for your company.</p>
     <div class="row"${hide}>
       <div class="f"><label for="c_name">Connector name</label><input id="c_name" placeholder="Office PC - Lahore"></div>
       <button id="c_add" type="button">Create connector</button>
@@ -347,6 +357,39 @@ async function loadEmployees() {
   });
 }
 
+async function downloadInstaller(connectorId, token) {
+  var res = await fetch("/api/connectors/" + connectorId + "/package", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(token ? { token: token } : {})
+  });
+  if (res.status === 401) { location.href = "/login"; throw new Error("Signed out"); }
+  if (!res.ok) {
+    var d = await res.json().catch(function () { return {}; });
+    throw new Error(d.error || ("Download failed (" + res.status + ")"));
+  }
+  var blob = await res.blob();
+  var m = /filename="([^"]+)"/.exec(res.headers.get("content-disposition") || "");
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = m ? m[1] : "ZKT-Connector.zip";
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+}
+
+async function loadStatus() {
+  var data = await api("GET", "/api/status");
+  var box = document.getElementById("alerts");
+  box.textContent = "";
+  data.alerts.forEach(function (al) {
+    var div = document.createElement("div");
+    div.className = "alert a-" + al.level;
+    div.textContent = al.text;
+    box.appendChild(div);
+  });
+}
+
 async function loadConnectors() {
   var data = await api("GET", "/api/connectors");
   var tbody = document.getElementById("c_rows");
@@ -364,6 +407,12 @@ async function loadConnectors() {
     tr.appendChild(td(c.device_count));
     var actions = document.createElement("td");
     if (CAN_MANAGE && c.is_active) {
+      actions.appendChild(btn("Download installer", true, async function () {
+        var msg = "Download a new installer for '" + c.name + "'?\\n\\nThis creates a new token. A PC already running this connector stops syncing until you run Install.cmd from the new download on it.";
+        if (c.last_seen_at && !confirm(msg)) return;
+        try { await downloadInstaller(c.id, null); showMsg("c_msg", ""); await refresh(); }
+        catch (err) { showMsg("c_msg", err.message); }
+      }));
       actions.appendChild(btn("Revoke", false, async function () {
         if (!confirm("Revoke connector '" + c.name + "'? It will stop working immediately.")) return;
         try { await api("POST", "/api/connectors/" + c.id + "/revoke", {}); await refresh(); } catch (err) { alert(err.message); }
@@ -431,7 +480,7 @@ async function loadJobs() {
 }
 
 async function refresh() {
-  try { await Promise.all([loadReports(), loadEmployees(), loadConnectors(), loadDevices(), loadJobs()]); }
+  try { await Promise.all([loadStatus(), loadReports(), loadEmployees(), loadConnectors(), loadDevices(), loadJobs()]); }
   catch (err) { showMsg("d_msg", err.message); }
 }
 
@@ -441,15 +490,39 @@ document.getElementById("c_add").addEventListener("click", async function () {
   try {
     var r = await api("POST", "/api/connectors", { name: document.getElementById("c_name").value });
     var wrap = document.createElement("div"); wrap.className = "token";
-    var title = document.createElement("strong"); title.textContent = "Connector token for '" + r.connector.name + "'";
+    var title = document.createElement("strong"); title.textContent = "Connector '" + r.connector.name + "' created";
+    var steps = document.createElement("ol"); steps.className = "steps";
+    ["Click Download installer (the ZIP is already set up for your company).",
+     "Copy the ZIP to a Windows PC on the same network as the machine.",
+     "Right-click it, choose Extract All, then double-click Install.cmd and click Yes."].forEach(function (t) {
+      var li = document.createElement("li"); li.textContent = t; steps.appendChild(li);
+    });
+    var dl = btn("Download installer", true, async function () {
+      dl.disabled = true;
+      try { await downloadInstaller(r.connector.id, r.token); dl.textContent = "Downloaded"; }
+      catch (err) { showMsg("c_msg", err.message); dl.disabled = false; }
+    });
+    var adv = document.createElement("details");
+    var sum = document.createElement("summary"); sum.textContent = "Show token (for manual setup)";
     var code = document.createElement("code"); code.textContent = r.token;
-    var note = document.createElement("div"); note.textContent = r.note;
-    var copy = btn("Copy token", true, function () { navigator.clipboard.writeText(r.token); copy.textContent = "Copied"; });
-    wrap.appendChild(title); wrap.appendChild(code); wrap.appendChild(note); wrap.appendChild(copy);
+    var copy = btn("Copy token", false, function () { navigator.clipboard.writeText(r.token); copy.textContent = "Copied"; });
+    adv.appendChild(sum); adv.appendChild(code); adv.appendChild(copy);
+    wrap.appendChild(title); wrap.appendChild(steps); wrap.appendChild(dl); wrap.appendChild(adv);
     box.appendChild(wrap);
     document.getElementById("c_name").value = "";
     await refresh();
   } catch (err) { showMsg("c_msg", err.message); }
+});
+
+document.getElementById("sync_all").addEventListener("click", async function () {
+  var b = this;
+  b.disabled = true;
+  try {
+    var r = await api("POST", "/api/devices/sync-all", {});
+    showMsg("x_msg", r.devices ? (r.queued + " machine(s) queued" + (r.already_queued ? ", " + r.already_queued + " already syncing" : "") + ". The connector picks them up within a minute.") : "No machine with an active connector.");
+    await refresh();
+  } catch (err) { showMsg("x_msg", err.message); }
+  b.disabled = false;
 });
 
 document.getElementById("d_add").addEventListener("click", async function () {
@@ -485,6 +558,6 @@ document.getElementById("logout").addEventListener("click", async function () {
 });
 
 refresh();
-setInterval(function () { loadJobs(); loadReports(); }, 15000);
+setInterval(function () { loadJobs(); loadReports(); loadStatus().catch(function () {}); }, 15000);
 </script>`);
 }

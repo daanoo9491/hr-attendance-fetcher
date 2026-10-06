@@ -5,8 +5,10 @@ import { health } from "./routes/health";
 import { login, logout, me, signup } from "./routes/auth";
 import {
   createConnector, createDevice, deactivateDevice, listConnectors,
-  listDevices, listSyncJobs, queueSync, revokeConnector,
+  listDevices, listSyncJobs, queueSync, revokeConnector, syncAll,
 } from "./routes/manage";
+import { downloadConnector } from "./routes/download";
+import { status } from "./routes/status";
 import { claimJob, completeJob, connectorConfig, uploadLogs, uploadUsers } from "./routes/connector";
 import { listEmployees, saveEmployee } from "./routes/employees";
 import { downloadReport, exportRange, listReports } from "./routes/reports";
@@ -24,6 +26,7 @@ const R_JOB_COMPLETE = new RegExp(`^/api/connector/jobs/${ID}/complete$`);
 const R_REPORT_DOWNLOAD = new RegExp(`^/api/reports/${ID}/download$`);
 const R_JOB_USERS = new RegExp(`^/api/connector/jobs/${ID}/users$`);
 const R_EMPLOYEE = /^\/api\/employees\/([^/]{1,100})$/;
+const R_CONNECTOR_PACKAGE = new RegExp(`^/api/connectors/${ID}/package$`);
 
 function safeDecode(s: string): string {
   try {
@@ -49,11 +52,14 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (pathname === "/api/connectors" && method === "GET") return listConnectors(request, env);
   if (pathname === "/api/connectors" && method === "POST") return createConnector(request, env);
   if (method === "POST" && (m = R_CONNECTOR_REVOKE.exec(pathname))) return revokeConnector(request, env, m[1]);
+  if (method === "POST" && (m = R_CONNECTOR_PACKAGE.exec(pathname))) return downloadConnector(request, env, m[1]);
   if (pathname === "/api/devices" && method === "GET") return listDevices(request, env);
   if (pathname === "/api/devices" && method === "POST") return createDevice(request, env);
+  if (pathname === "/api/devices/sync-all" && method === "POST") return syncAll(request, env);
   if (method === "POST" && (m = R_DEVICE_DEACTIVATE.exec(pathname))) return deactivateDevice(request, env, m[1]);
   if (method === "POST" && (m = R_DEVICE_SYNC.exec(pathname))) return queueSync(request, env, m[1]);
   if (pathname === "/api/sync-jobs" && method === "GET") return listSyncJobs(request, env);
+  if (pathname === "/api/status" && method === "GET") return status(request, env);
   if (pathname === "/api/reports" && method === "GET") return listReports(request, env);
   if (method === "GET" && (m = R_REPORT_DOWNLOAD.exec(pathname))) return downloadReport(request, env, m[1]);
   if (pathname === "/api/export.xlsx" && method === "GET") return exportRange(request, env);
