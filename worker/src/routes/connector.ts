@@ -3,6 +3,7 @@
 import type { Env } from "../env";
 import { HttpError, json, readJson } from "../lib/http";
 import { sha256Hex } from "../lib/crypto";
+import { finalizeReportIfDone } from "../scheduler";
 
 const MAX_RECORDS_PER_UPLOAD = 1000;
 const STALE_JOB_MINUTES = 30;
@@ -37,10 +38,11 @@ async function requireConnector(request: Request, env: Env): Promise<ConnectorCo
 /** Loads a job only if it belongs to one of this connector's devices. */
 async function loadOwnJob(env: Env, ctx: ConnectorContext, jobId: string) {
   const job = await env.DB.prepare(
-    `SELECT j.id, j.status, j.device_id, j.company_id
+    `SELECT j.id, j.status, j.device_id, j.company_id, j.report_id
        FROM sync_jobs j JOIN devices d ON d.id = j.device_id
       WHERE j.id = ? AND j.company_id = ? AND d.connector_id = ?`,
-  ).bind(jobId, ctx.companyId, ctx.connectorId).first<{ id: string; status: string; device_id: string; company_id: string }>();
+  ).bind(jobId, ctx.companyId, ctx.connectorId)
+    .first<{ id: string; status: string; device_id: string; company_id: string; report_id: string | null }>();
   if (!job) throw new HttpError(404, "Job not found");
   return job;
 }
@@ -200,6 +202,9 @@ export async function completeJob(request: Request, env: Env, jobId: string): Pr
     );
   }
   await env.DB.batch(statements);
+
+  // If this was the last machine for a scheduled report, the report is ready now.
+  if (job.report_id) await finalizeReportIfDone(env, job.report_id);
 
   const summary = await env.DB.prepare(
     `SELECT id, status, records_fetched, records_inserted, records_skipped, finished_at, error_message

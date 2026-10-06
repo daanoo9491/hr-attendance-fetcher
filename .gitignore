@@ -4,4 +4,7 @@ node_modules/
 .env
 dist/
 *.log
+*.log.old
 output/
+logs/
+run-connector.cmd

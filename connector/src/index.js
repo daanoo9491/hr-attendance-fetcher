@@ -26,7 +26,19 @@ async function main() {
   log.info(`ZKT Connector ${CONNECTOR_VERSION} starting${once ? " (single run)" : ""}`);
   const api = clientFromEnv();
 
-  const config = await api.getConfig();
+  // At Windows start-up the network may not be ready yet: keep trying (except for a bad token).
+  let config;
+  for (;;) {
+    try {
+      config = await api.getConfig();
+      break;
+    } catch (err) {
+      if (err.status === 401 || once) throw err;
+      log.warn(`Server not reachable yet (${err.message}). Retrying in 30 s`);
+      await sleepUnlessStopping(30);
+      if (stopping) return;
+    }
+  }
   log.info(`Connected to ${api.baseUrl} as connector "${config.connector.name}"`);
   if (!config.devices.length) log.warn("No devices assigned to this connector yet (add one in the dashboard).");
   for (const d of config.devices) log.info(`Device "${d.name}" at ${d.ip_address}:${d.port}`);

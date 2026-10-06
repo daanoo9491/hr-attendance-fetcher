@@ -45,7 +45,9 @@ th { color:var(--muted); font-weight:500; }
 td.err { white-space:normal; color:var(--error); max-width:280px; }
 td.warn { color:#b26b00; }
 .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid var(--border); }
-.b-success, .b-active { color:#1a7f37; border-color:#1a7f37; }
+.b-success, .b-active, .b-ready { color:#1a7f37; border-color:#1a7f37; }
+.b-collecting { color:#b26b00; border-color:#b26b00; }
+a.dl { display:inline-block; text-decoration:none; border-radius:8px; }
 .b-failed, .b-revoked, .b-inactive { color:var(--error); border-color:var(--error); }
 .b-running, .b-pending { color:#b26b00; border-color:#b26b00; }
 .token { margin-top:14px; padding:12px; border:1px dashed var(--accent); border-radius:8px; font-size:13px; }
@@ -154,6 +156,21 @@ export function appPage(auth: AuthContext): string {
   </div>
 
   <div class="card">
+    <h2>Attendance reports</h2>
+    <p class="sub" id="r_sched">Every 2 days an Excel report of the previous 2 days is prepared automatically.</p>
+    <div class="tbl"><table>
+      <thead><tr><th>Period</th><th>Status</th><th>Machines synced</th><th>Employees</th><th>Punches</th><th>Ready at</th><th>Note</th><th></th></tr></thead>
+      <tbody id="r_rows"></tbody>
+    </table></div>
+    <div class="row" style="margin-top:16px">
+      <div class="f" style="flex:0 1 170px"><label for="x_from">Custom export from</label><input id="x_from" type="date"></div>
+      <div class="f" style="flex:0 1 170px"><label for="x_to">to</label><input id="x_to" type="date"></div>
+      <button id="x_go" type="button">Download Excel</button>
+    </div>
+    <div class="msg" id="x_msg"></div>
+  </div>
+
+  <div class="card">
     <h2>1. Connectors</h2>
     <p class="sub">A connector is the ZKT Connector app on an office PC that can reach the machine. Its token goes into connector/.env.</p>
     <div class="row"${hide}>
@@ -225,6 +242,39 @@ function clockCell(sec) {
 }
 function emptyRow(tbody, cols, text) { var tr = document.createElement("tr"); var c = document.createElement("td"); c.colSpan = cols; c.className = "empty"; c.textContent = text; tr.appendChild(c); tbody.appendChild(tr); }
 function showMsg(id, text) { document.getElementById(id).textContent = text || ""; }
+
+function fmtDate(d) { var p = d.split("-"); var m = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][Number(p[1]) - 1]; return p[2] + " " + m + " " + p[0]; }
+function period(a, b) { return a === b ? fmtDate(a) : fmtDate(a) + " \\u2013 " + fmtDate(b); }
+function isoLocal(offsetDays) { var d = new Date(); d.setDate(d.getDate() + offsetDays); var p = function (n) { return String(n).padStart(2, "0"); }; return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()); }
+
+async function loadReports() {
+  var data = await api("GET", "/api/reports");
+  var s = data.schedule;
+  document.getElementById("r_sched").textContent =
+    "Every " + s.every_days + " days an Excel report of the previous " + s.every_days + " days is prepared automatically. Next: " +
+    period(s.next_start, s.next_end) + ", ready on " + fmtDate(s.next_due) + " after " + String(s.hour).padStart(2, "0") + ":00 (" + s.timezone + ").";
+  var tbody = document.getElementById("r_rows");
+  tbody.textContent = "";
+  if (!data.reports.length) emptyRow(tbody, 8, "No reports yet. The first one is created at the next scheduled time.");
+  data.reports.forEach(function (r) {
+    var tr = document.createElement("tr");
+    tr.appendChild(td(period(r.period_start, r.period_end)));
+    tr.appendChild(badge(r.status === "ready" ? "ready" : "collecting"));
+    tr.appendChild(td(r.devices_synced + " / " + r.devices_total));
+    tr.appendChild(td(r.status === "ready" ? r.employee_count : ""));
+    tr.appendChild(td(r.status === "ready" ? r.punch_count : ""));
+    tr.appendChild(td(when(r.ready_at)));
+    tr.appendChild(td(r.note, r.note ? "warn" : ""));
+    var actions = document.createElement("td");
+    var a = document.createElement("a");
+    a.href = "/api/reports/" + r.id + "/download";
+    a.className = "sm primary dl";
+    a.textContent = "Download Excel";
+    actions.appendChild(a);
+    tr.appendChild(actions);
+    tbody.appendChild(tr);
+  });
+}
 
 async function loadConnectors() {
   var data = await api("GET", "/api/connectors");
@@ -310,7 +360,7 @@ async function loadJobs() {
 }
 
 async function refresh() {
-  try { await Promise.all([loadConnectors(), loadDevices(), loadJobs()]); }
+  try { await Promise.all([loadReports(), loadConnectors(), loadDevices(), loadJobs()]); }
   catch (err) { showMsg("d_msg", err.message); }
 }
 
@@ -347,12 +397,23 @@ document.getElementById("d_add").addEventListener("click", async function () {
   } catch (err) { showMsg("d_msg", err.message); }
 });
 
+document.getElementById("x_from").value = isoLocal(-2);
+document.getElementById("x_to").value = isoLocal(-1);
+document.getElementById("x_go").addEventListener("click", function () {
+  var from = document.getElementById("x_from").value;
+  var to = document.getElementById("x_to").value;
+  if (!from || !to) { showMsg("x_msg", "Choose both dates."); return; }
+  if (to < from) { showMsg("x_msg", "'to' must be on or after 'from'."); return; }
+  showMsg("x_msg", "");
+  location.href = "/api/export.xlsx?from=" + encodeURIComponent(from) + "&to=" + encodeURIComponent(to);
+});
+
 document.getElementById("logout").addEventListener("click", async function () {
   await fetch("/api/auth/logout", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
   location.href = "/login";
 });
 
 refresh();
-setInterval(loadJobs, 15000);
+setInterval(function () { loadJobs(); loadReports(); }, 15000);
 </script>`);
 }

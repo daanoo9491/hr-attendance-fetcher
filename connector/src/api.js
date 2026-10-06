@@ -1,5 +1,5 @@
 // HTTP client for the Attendance Fetcher Worker (connector side).
-export const CONNECTOR_VERSION = "0.5.0";
+export const CONNECTOR_VERSION = "0.6.0";
 
 export class ApiClient {
   constructor(baseUrl, token) {

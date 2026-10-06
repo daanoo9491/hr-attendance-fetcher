@@ -8,6 +8,8 @@ import {
   listDevices, listSyncJobs, queueSync, revokeConnector,
 } from "./routes/manage";
 import { claimJob, completeJob, connectorConfig, uploadLogs } from "./routes/connector";
+import { downloadReport, exportRange, listReports } from "./routes/reports";
+import { runScheduler } from "./scheduler";
 import { appPage, loginPage, signupPage } from "./pages";
 
 export type { Env };
@@ -18,6 +20,7 @@ const R_DEVICE_DEACTIVATE = new RegExp(`^/api/devices/${ID}/deactivate$`);
 const R_DEVICE_SYNC = new RegExp(`^/api/devices/${ID}/sync$`);
 const R_JOB_LOGS = new RegExp(`^/api/connector/jobs/${ID}/logs$`);
 const R_JOB_COMPLETE = new RegExp(`^/api/connector/jobs/${ID}/complete$`);
+const R_REPORT_DOWNLOAD = new RegExp(`^/api/reports/${ID}/download$`);
 
 async function route(request: Request, env: Env): Promise<Response> {
   const { pathname } = new URL(request.url);
@@ -40,6 +43,9 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (method === "POST" && (m = R_DEVICE_DEACTIVATE.exec(pathname))) return deactivateDevice(request, env, m[1]);
   if (method === "POST" && (m = R_DEVICE_SYNC.exec(pathname))) return queueSync(request, env, m[1]);
   if (pathname === "/api/sync-jobs" && method === "GET") return listSyncJobs(request, env);
+  if (pathname === "/api/reports" && method === "GET") return listReports(request, env);
+  if (method === "GET" && (m = R_REPORT_DOWNLOAD.exec(pathname))) return downloadReport(request, env, m[1]);
+  if (pathname === "/api/export.xlsx" && method === "GET") return exportRange(request, env);
 
   // ---- ZKT Connector API (Bearer token)
   if (pathname === "/api/connector/config" && method === "GET") return connectorConfig(request, env);
@@ -78,5 +84,10 @@ export default {
       console.error(err);
       return json({ error: "Internal server error" }, 500);
     }
+  },
+
+  // Cloudflare cron (see [triggers] in wrangler.toml): runs every hour.
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(runScheduler(env, new Date(controller.scheduledTime)));
   },
 };
