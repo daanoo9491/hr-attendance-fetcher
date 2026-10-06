@@ -1,7 +1,7 @@
 // Phase 3 end-to-end test of the connector API, WITHOUT the machine.
 // Uploads two fake punches for user "TEST" dated 2000-01-01, then uploads
 // them again to prove duplicates are skipped. Run: npm run api-test
-import "dotenv/config";
+import "./env.js";
 import { clientFromEnv, CONNECTOR_VERSION } from "./api.js";
 
 const TEST_RECORDS = [

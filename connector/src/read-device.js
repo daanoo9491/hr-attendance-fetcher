@@ -5,7 +5,7 @@
 //   npm run read-device -- --device "K40PIA"    -> pick one when the connector has several
 //   npm run read-device -- --ip 192.168.10.21   -> skip the dashboard, connect directly
 //   npm run read-device -- --csv                -> also save all punches to output/*.csv
-import "dotenv/config";
+import "./env.js";
 import fs from "node:fs";
 import path from "node:path";
 import { readDevice } from "./zk/client.js";

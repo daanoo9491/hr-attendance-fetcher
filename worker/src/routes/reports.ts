@@ -7,7 +7,7 @@ import { buildAttendanceReport, reportFilename, xlsxResponse } from "../report";
 
 const MAX_EXPORT_DAYS = 62;
 
-async function schedule(env: Env, auth: AuthContext) {
+export async function schedule(env: Env, auth: AuthContext) {
   const c = await env.DB.prepare("SELECT report_every_days, report_hour FROM companies WHERE id = ?")
     .bind(auth.companyId).first<{ report_every_days: number; report_hour: number }>();
   const everyDays = c?.report_every_days ?? 2;

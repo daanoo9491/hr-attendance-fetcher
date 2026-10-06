@@ -50,7 +50,7 @@ export async function status(request: Request, env: Env): Promise<Response> {
   const ds = devices ?? [];
 
   if (!cs.length) {
-    alerts.push({ level: "info", text: "Get started: create a connector below, then click Download installer and run it on a PC on the machine's network." });
+    alerts.push({ level: "info", text: "Get started: under Machines, create a connector, download its installer and run it on a PC on the machine's network." });
   }
   for (const c of cs) {
     if (!c.last_seen_at) {
@@ -61,7 +61,7 @@ export async function status(request: Request, env: Env): Promise<Response> {
       alerts.push({ level: "info", text: `Connector "${c.name}" runs version ${c.version}; ${CONNECTOR_VERSION} is available. Click Download installer and run Install.cmd to update.` });
     }
     if (c.devices === 0) {
-      alerts.push({ level: "info", text: `Connector "${c.name}" has no machine assigned. Add a device below.` });
+      alerts.push({ level: "info", text: `Connector "${c.name}" has no machine assigned yet. Add one under Machines.` });
     }
   }
   for (const d of ds) {

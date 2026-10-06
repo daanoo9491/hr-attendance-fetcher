@@ -1,7 +1,7 @@
 // ZKT Connector main loop.
 //   npm start                 -> runs continuously: picks up sync jobs and imports attendance
 //   npm start -- --once       -> processes at most one pending job, then exits
-import "dotenv/config";
+import "./env.js";
 import { CONNECTOR_VERSION, clientFromEnv } from "./api.js";
 import { processJob } from "./sync.js";
 import { log } from "./log.js";

@@ -9,6 +9,7 @@ import {
 } from "./routes/manage";
 import { downloadConnector } from "./routes/download";
 import { status } from "./routes/status";
+import { overview } from "./routes/overview";
 import { claimJob, completeJob, connectorConfig, uploadLogs, uploadUsers } from "./routes/connector";
 import { listEmployees, saveEmployee } from "./routes/employees";
 import { downloadReport, exportRange, listReports } from "./routes/reports";
@@ -60,6 +61,7 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (method === "POST" && (m = R_DEVICE_SYNC.exec(pathname))) return queueSync(request, env, m[1]);
   if (pathname === "/api/sync-jobs" && method === "GET") return listSyncJobs(request, env);
   if (pathname === "/api/status" && method === "GET") return status(request, env);
+  if (pathname === "/api/overview" && method === "GET") return overview(request, env);
   if (pathname === "/api/reports" && method === "GET") return listReports(request, env);
   if (method === "GET" && (m = R_REPORT_DOWNLOAD.exec(pathname))) return downloadReport(request, env, m[1]);
   if (pathname === "/api/export.xlsx" && method === "GET") return exportRange(request, env);

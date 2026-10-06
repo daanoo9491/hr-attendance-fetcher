@@ -16,7 +16,6 @@ if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
 
 $dir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if (-not (Test-Path (Join-Path $dir ".env")))         { throw ".env not found in $dir - create it first (see .env.example)." }
-if (-not (Test-Path (Join-Path $dir "node_modules"))) { throw "Run 'npm install' in $dir first." }
 $node = (Get-Command node -ErrorAction SilentlyContinue).Source
 if (-not $node) { throw "Node.js was not found in PATH." }
 

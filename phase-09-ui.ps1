@@ -1,3 +1,61 @@
+# =====================================================================
+# HR Auto Attendance Fetcher - PHASE 9 : Professional UI redesign
+# (sidebar navigation, daily attendance timeline, new sign-in pages)
+# Run from the ROOT of the repo (hr-attendance-fetcher):
+#   powershell -ExecutionPolicy Bypass -File .\phase-09-ui.ps1
+# =====================================================================
+$ErrorActionPreference = "Stop"
+
+function Write-File([string]$Path, [string]$Content) {
+    $full = Join-Path (Get-Location) $Path
+    $dir  = Split-Path $full -Parent
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    [System.IO.File]::WriteAllText($full, $Content.Replace("`r`n", "`n"), (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "  wrote $Path" -ForegroundColor Green
+}
+
+if (-not (Test-Path "worker/src/routes/download.ts")) {
+    throw "Run this from the repo root, after Phase 8 (worker/src/routes/download.ts not found)."
+}
+
+Write-Host "Phase 9: writing the new dashboard UI..." -ForegroundColor Cyan
+
+# ---------------------------------------------------------------- worker/package.json
+Write-File "worker/package.json" @'
+{
+  "name": "hr-attendance-worker",
+  "version": "0.9.0",
+  "private": true,
+  "scripts": {
+    "bundle-connector": "node scripts/bundle-connector.mjs",
+    "dev": "npm run bundle-connector && wrangler dev",
+    "deploy": "npm run bundle-connector && wrangler deploy",
+    "typecheck": "npm run bundle-connector && tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261001.1",
+    "typescript": "^5.6.0",
+    "wrangler": "^4.0.0"
+  }
+}
+'@
+
+# ---------------------------------------------------------------- worker/src/env.ts
+Write-File "worker/src/env.ts" @'
+export interface Env {
+  DB: D1Database;
+  /** Optional. When set, sign-up requires this code (set with: wrangler secret put SIGNUP_CODE). */
+  SIGNUP_CODE?: string;
+}
+
+export const VERSION = "0.9.0-phase9";
+
+/** Number of files in worker/migrations. The health check reports "degraded" until all are applied. */
+export const EXPECTED_MIGRATIONS = 5;
+'@
+
+# ---------------------------------------------------------------- worker/src/pages.ts
+Write-File "worker/src/pages.ts" @'
 import { VERSION } from "./env";
 import type { AuthContext } from "./lib/auth";
 import { escapeHtml } from "./lib/http";
@@ -1067,3 +1125,361 @@ setInterval(function () {
   if (ovDate === ovToday) quiet(loadOverview());
 }, 20000);
 </script>`;
+'@
+
+# ---------------------------------------------------------------- worker/src/routes/overview.ts
+Write-File "worker/src/routes/overview.ts" @'
+// GET /api/overview?date=YYYY-MM-DD - one day of attendance for the dashboard timeline.
+import type { Env } from "../env";
+import { HttpError, json } from "../lib/http";
+import { requireAuth } from "../lib/auth";
+import { addDays, isDate, localNow } from "../lib/dates";
+import { schedule } from "./reports";
+
+export async function overview(request: Request, env: Env): Promise<Response> {
+  const auth = await requireAuth(request, env);
+  const today = localNow(new Date(), auth.companyTimezone).date;
+  const q = new URL(request.url).searchParams.get("date");
+  if (q !== null && !isDate(q)) throw new HttpError(400, "date must be YYYY-MM-DD");
+  const date = q ?? today;
+
+  const { results: punches } = await env.DB.prepare(
+    `SELECT l.device_user_id AS user_id, substr(l.punch_time, 12, 5) AS time
+       FROM attendance_logs l
+      WHERE l.company_id = ? AND l.punch_time >= ? AND l.punch_time < ?
+      ORDER BY l.punch_time`,
+  ).bind(auth.companyId, `${date} 00:00:00`, `${addDays(date, 1)} 00:00:00`).all<{ user_id: string; time: string }>();
+
+  // Everyone the company knows: employees table + anyone who ever punched.
+  const { results: people } = await env.DB.prepare(
+    `WITH ids AS (
+       SELECT device_user_id FROM employees WHERE company_id = ?1 AND is_active = 1
+       UNION SELECT DISTINCT device_user_id FROM attendance_logs WHERE company_id = ?1
+     )
+     SELECT ids.device_user_id AS user_id, NULLIF(e.full_name, '') AS name, e.department
+       FROM ids LEFT JOIN employees e ON e.company_id = ?1 AND e.device_user_id = ids.device_user_id`,
+  ).bind(auth.companyId).all<{ user_id: string; name: string | null; department: string | null }>();
+
+  const sync = await env.DB.prepare(
+    "SELECT MAX(last_sync_at) AS last_sync, COUNT(*) AS machines FROM devices WHERE company_id = ? AND is_active = 1",
+  ).bind(auth.companyId).first<{ last_sync: string | null; machines: number }>();
+
+  const byUser = new Map<string, string[]>();
+  for (const p of punches ?? []) {
+    const list = byUser.get(p.user_id) ?? [];
+    list.push(p.time);
+    byUser.set(p.user_id, list);
+  }
+  const info = new Map((people ?? []).map((p) => [p.user_id, p]));
+  const present = [...byUser].map(([user_id, times]) => ({
+    user_id, name: info.get(user_id)?.name ?? null, department: info.get(user_id)?.department ?? null, punches: times,
+  }));
+  present.sort((a, b) => a.punches[0].localeCompare(b.punches[0]) || a.user_id.localeCompare(b.user_id));
+  const absent = (people ?? [])
+    .filter((p) => !byUser.has(p.user_id))
+    .map((p) => ({ user_id: p.user_id, name: p.name }))
+    .sort((a, b) => (a.name ?? "~").localeCompare(b.name ?? "~") || a.user_id.localeCompare(b.user_id));
+
+  return json({
+    date,
+    today,
+    present,
+    absent,
+    punches: punches?.length ?? 0,
+    last_sync: sync?.last_sync ?? null,
+    machines: sync?.machines ?? 0,
+    schedule: await schedule(env, auth),
+  });
+}
+'@
+
+# ---------------------------------------------------------------- worker/src/routes/reports.ts
+Write-File "worker/src/routes/reports.ts" @'
+// Attendance report API (browser session). Any role may view and download.
+import type { Env } from "../env";
+import { HttpError, json } from "../lib/http";
+import { requireAuth, type AuthContext } from "../lib/auth";
+import { daysBetween, isDate, localNow, nextPeriod } from "../lib/dates";
+import { buildAttendanceReport, reportFilename, xlsxResponse } from "../report";
+
+const MAX_EXPORT_DAYS = 62;
+
+export async function schedule(env: Env, auth: AuthContext) {
+  const c = await env.DB.prepare("SELECT report_every_days, report_hour FROM companies WHERE id = ?")
+    .bind(auth.companyId).first<{ report_every_days: number; report_hour: number }>();
+  const everyDays = c?.report_every_days ?? 2;
+  const hour = c?.report_hour ?? 1;
+  const last = await env.DB.prepare(
+    "SELECT period_end FROM reports WHERE company_id = ? ORDER BY period_end DESC LIMIT 1",
+  ).bind(auth.companyId).first<{ period_end: string }>();
+  const today = localNow(new Date(), auth.companyTimezone).date;
+  const next = nextPeriod(last?.period_end ?? null, today, everyDays);
+  return { every_days: everyDays, hour, timezone: auth.companyTimezone, next_start: next.start, next_end: next.end, next_due: next.dueDate };
+}
+
+/** GET /api/reports */
+export async function listReports(request: Request, env: Env): Promise<Response> {
+  const auth = await requireAuth(request, env);
+  const { results } = await env.DB.prepare(
+    `SELECT id, period_start, period_end, status, devices_total, devices_synced,
+            punch_count, employee_count, note, created_at, ready_at
+       FROM reports
+      WHERE company_id = ?
+      ORDER BY period_end DESC
+      LIMIT 30`,
+  ).bind(auth.companyId).all();
+  return json({ reports: results ?? [], schedule: await schedule(env, auth) });
+}
+
+/** GET /api/reports/:id/download */
+export async function downloadReport(request: Request, env: Env, id: string): Promise<Response> {
+  const auth = await requireAuth(request, env);
+  const report = await env.DB.prepare(
+    "SELECT period_start, period_end, status, devices_total, devices_synced, note FROM reports WHERE id = ? AND company_id = ?",
+  ).bind(id, auth.companyId).first<{
+    period_start: string; period_end: string; status: string; devices_total: number; devices_synced: number; note: string | null;
+  }>();
+  if (!report) throw new HttpError(404, "Report not found");
+
+  const notes = [`Scheduled report: ${report.devices_synced}/${report.devices_total} machine(s) synced for this period.`];
+  if (report.status !== "ready") notes.push("This report was still collecting data when downloaded.");
+  if (report.note) notes.push(report.note);
+
+  const { bytes } = await buildAttendanceReport(
+    env,
+    { companyId: auth.companyId, companyName: auth.companyName, timezone: auth.companyTimezone, notes },
+    report.period_start,
+    report.period_end,
+  );
+  return xlsxResponse(bytes, reportFilename(auth.companyName, report.period_start, report.period_end));
+}
+
+/** GET /api/export.xlsx?from=YYYY-MM-DD&to=YYYY-MM-DD */
+export async function exportRange(request: Request, env: Env): Promise<Response> {
+  const auth = await requireAuth(request, env);
+  const params = new URL(request.url).searchParams;
+  const from = params.get("from");
+  const to = params.get("to");
+  if (!isDate(from) || !isDate(to)) throw new HttpError(400, "from and to must be dates (YYYY-MM-DD)");
+  if (to < from) throw new HttpError(400, "'to' must be on or after 'from'");
+  if (daysBetween(from, to) + 1 > MAX_EXPORT_DAYS) throw new HttpError(400, `Export at most ${MAX_EXPORT_DAYS} days at a time`);
+
+  const { bytes } = await buildAttendanceReport(
+    env,
+    { companyId: auth.companyId, companyName: auth.companyName, timezone: auth.companyTimezone, notes: ["Manual export."] },
+    from,
+    to,
+  );
+  return xlsxResponse(bytes, reportFilename(auth.companyName, from, to));
+}
+'@
+
+# ---------------------------------------------------------------- worker/src/routes/status.ts
+Write-File "worker/src/routes/status.ts" @'
+// Dashboard status: problems that need attention, worst first.
+import type { Env } from "../env";
+import { json } from "../lib/http";
+import { requireAuth } from "../lib/auth";
+import { CONNECTOR_VERSION } from "../generated/connector-files";
+
+const OFFLINE_MINUTES = 10;
+const CLOCK_WARN_SECONDS = 120;
+
+type Level = "error" | "warning" | "info";
+interface Alert { level: Level; text: string }
+
+function versionLess(a: string, b: string): boolean {
+  const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = b.split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) < (pb[i] ?? 0);
+  return false;
+}
+
+function ago(iso: string, now: number): string {
+  const min = Math.round((now - Date.parse(iso)) / 60000);
+  if (min < 60) return `${min} min ago`;
+  if (min < 48 * 60) return `${Math.round(min / 60)} h ago`;
+  return `${Math.round(min / 1440)} days ago`;
+}
+
+/** GET /api/status */
+export async function status(request: Request, env: Env): Promise<Response> {
+  const auth = await requireAuth(request, env);
+  const now = Date.now();
+  const alerts: Alert[] = [];
+
+  const { results: connectors } = await env.DB.prepare(
+    `SELECT c.id, c.name, c.version, c.last_seen_at,
+            (SELECT COUNT(*) FROM devices d WHERE d.connector_id = c.id AND d.is_active = 1) AS devices
+       FROM connectors c WHERE c.company_id = ? AND c.is_active = 1`,
+  ).bind(auth.companyId).all<{ id: string; name: string; version: string | null; last_seen_at: string | null; devices: number }>();
+
+  const { results: devices } = await env.DB.prepare(
+    `SELECT d.id, d.name, d.connector_id, d.clock_offset_seconds,
+            (SELECT j.status FROM sync_jobs j WHERE j.device_id = d.id ORDER BY j.requested_at DESC LIMIT 1) AS last_status,
+            (SELECT j.error_message FROM sync_jobs j WHERE j.device_id = d.id ORDER BY j.requested_at DESC LIMIT 1) AS last_error
+       FROM devices d WHERE d.company_id = ? AND d.is_active = 1`,
+  ).bind(auth.companyId).all<{
+    id: string; name: string; connector_id: string | null; clock_offset_seconds: number | null;
+    last_status: string | null; last_error: string | null;
+  }>();
+
+  const cs = connectors ?? [];
+  const ds = devices ?? [];
+
+  if (!cs.length) {
+    alerts.push({ level: "info", text: "Get started: under Machines, create a connector, download its installer and run it on a PC on the machine's network." });
+  }
+  for (const c of cs) {
+    if (!c.last_seen_at) {
+      alerts.push({ level: "warning", text: `Connector "${c.name}" has not connected yet. Download the installer and run Install.cmd on the office PC.` });
+    } else if (now - Date.parse(c.last_seen_at) > OFFLINE_MINUTES * 60000) {
+      alerts.push({ level: "error", text: `Connector "${c.name}" is offline (last seen ${ago(c.last_seen_at, now)}). Check that the office PC is on and connected to the internet.` });
+    } else if (c.version && versionLess(c.version, CONNECTOR_VERSION)) {
+      alerts.push({ level: "info", text: `Connector "${c.name}" runs version ${c.version}; ${CONNECTOR_VERSION} is available. Click Download installer and run Install.cmd to update.` });
+    }
+    if (c.devices === 0) {
+      alerts.push({ level: "info", text: `Connector "${c.name}" has no machine assigned yet. Add one under Machines.` });
+    }
+  }
+  for (const d of ds) {
+    if (!d.connector_id || !cs.some((c) => c.id === d.connector_id)) {
+      alerts.push({ level: "warning", text: `Machine "${d.name}" has no active connector, so it cannot sync.` });
+    }
+    if (d.last_status === "failed") {
+      alerts.push({ level: "error", text: `Last sync of "${d.name}" failed: ${d.last_error ?? "unknown error"}` });
+    }
+    if (d.clock_offset_seconds !== null && Math.abs(d.clock_offset_seconds) > CLOCK_WARN_SECONDS) {
+      const sec = Math.abs(d.clock_offset_seconds);
+      const amount = sec < 5400 ? `${Math.round(sec / 60)} min` : sec < 172800 ? `${Math.round(sec / 3600)} h` : `${Math.round(sec / 86400)} days`;
+      alerts.push({ level: "warning", text: `The clock on "${d.name}" is ${amount} ${d.clock_offset_seconds < 0 ? "slow" : "fast"}. Set the correct time on the machine (Menu > System > Date/Time).` });
+    }
+  }
+
+  const order: Record<Level, number> = { error: 0, warning: 1, info: 2 };
+  alerts.sort((a, b) => order[a.level] - order[b.level]);
+  return json({ alerts, latest_connector_version: CONNECTOR_VERSION });
+}
+'@
+
+# ---------------------------------------------------------------- worker/src/index.ts
+Write-File "worker/src/index.ts" @'
+import type { Env } from "./env";
+import { HttpError, html, json, redirect } from "./lib/http";
+import { getAuth } from "./lib/auth";
+import { health } from "./routes/health";
+import { login, logout, me, signup } from "./routes/auth";
+import {
+  createConnector, createDevice, deactivateDevice, listConnectors,
+  listDevices, listSyncJobs, queueSync, revokeConnector, syncAll,
+} from "./routes/manage";
+import { downloadConnector } from "./routes/download";
+import { status } from "./routes/status";
+import { overview } from "./routes/overview";
+import { claimJob, completeJob, connectorConfig, uploadLogs, uploadUsers } from "./routes/connector";
+import { listEmployees, saveEmployee } from "./routes/employees";
+import { downloadReport, exportRange, listReports } from "./routes/reports";
+import { runScheduler } from "./scheduler";
+import { appPage, loginPage, signupPage } from "./pages";
+
+export type { Env };
+
+const ID = "([0-9a-f-]{36})";
+const R_CONNECTOR_REVOKE = new RegExp(`^/api/connectors/${ID}/revoke$`);
+const R_DEVICE_DEACTIVATE = new RegExp(`^/api/devices/${ID}/deactivate$`);
+const R_DEVICE_SYNC = new RegExp(`^/api/devices/${ID}/sync$`);
+const R_JOB_LOGS = new RegExp(`^/api/connector/jobs/${ID}/logs$`);
+const R_JOB_COMPLETE = new RegExp(`^/api/connector/jobs/${ID}/complete$`);
+const R_REPORT_DOWNLOAD = new RegExp(`^/api/reports/${ID}/download$`);
+const R_JOB_USERS = new RegExp(`^/api/connector/jobs/${ID}/users$`);
+const R_EMPLOYEE = /^\/api\/employees\/([^/]{1,100})$/;
+const R_CONNECTOR_PACKAGE = new RegExp(`^/api/connectors/${ID}/package$`);
+
+function safeDecode(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    throw new HttpError(400, "Invalid URL");
+  }
+}
+
+async function route(request: Request, env: Env): Promise<Response> {
+  const { pathname } = new URL(request.url);
+  const method = request.method;
+  let m: RegExpExecArray | null;
+
+  // ---- Public / auth
+  if (pathname === "/api/health" && method === "GET") return health(env);
+  if (pathname === "/api/auth/signup" && method === "POST") return signup(request, env);
+  if (pathname === "/api/auth/login" && method === "POST") return login(request, env);
+  if (pathname === "/api/auth/logout" && method === "POST") return logout(request, env);
+  if (pathname === "/api/auth/me" && method === "GET") return me(request, env);
+
+  // ---- Dashboard API (browser session)
+  if (pathname === "/api/connectors" && method === "GET") return listConnectors(request, env);
+  if (pathname === "/api/connectors" && method === "POST") return createConnector(request, env);
+  if (method === "POST" && (m = R_CONNECTOR_REVOKE.exec(pathname))) return revokeConnector(request, env, m[1]);
+  if (method === "POST" && (m = R_CONNECTOR_PACKAGE.exec(pathname))) return downloadConnector(request, env, m[1]);
+  if (pathname === "/api/devices" && method === "GET") return listDevices(request, env);
+  if (pathname === "/api/devices" && method === "POST") return createDevice(request, env);
+  if (pathname === "/api/devices/sync-all" && method === "POST") return syncAll(request, env);
+  if (method === "POST" && (m = R_DEVICE_DEACTIVATE.exec(pathname))) return deactivateDevice(request, env, m[1]);
+  if (method === "POST" && (m = R_DEVICE_SYNC.exec(pathname))) return queueSync(request, env, m[1]);
+  if (pathname === "/api/sync-jobs" && method === "GET") return listSyncJobs(request, env);
+  if (pathname === "/api/status" && method === "GET") return status(request, env);
+  if (pathname === "/api/overview" && method === "GET") return overview(request, env);
+  if (pathname === "/api/reports" && method === "GET") return listReports(request, env);
+  if (method === "GET" && (m = R_REPORT_DOWNLOAD.exec(pathname))) return downloadReport(request, env, m[1]);
+  if (pathname === "/api/export.xlsx" && method === "GET") return exportRange(request, env);
+  if (pathname === "/api/employees" && method === "GET") return listEmployees(request, env);
+  if (method === "PUT" && (m = R_EMPLOYEE.exec(pathname))) return saveEmployee(request, env, safeDecode(m[1]));
+
+  // ---- ZKT Connector API (Bearer token)
+  if (pathname === "/api/connector/config" && method === "GET") return connectorConfig(request, env);
+  if (pathname === "/api/connector/jobs/claim" && method === "POST") return claimJob(request, env);
+  if (method === "POST" && (m = R_JOB_LOGS.exec(pathname))) return uploadLogs(request, env, m[1]);
+  if (method === "POST" && (m = R_JOB_USERS.exec(pathname))) return uploadUsers(request, env, m[1]);
+  if (method === "POST" && (m = R_JOB_COMPLETE.exec(pathname))) return completeJob(request, env, m[1]);
+
+  if (pathname.startsWith("/api/")) return json({ error: "Not found" }, 404);
+
+  // ---- Pages
+  if (method === "GET") {
+    if (pathname === "/") {
+      return redirect((await getAuth(request, env)) ? "/app" : "/login");
+    }
+    if (pathname === "/login") {
+      return (await getAuth(request, env)) ? redirect("/app") : html(loginPage());
+    }
+    if (pathname === "/signup") {
+      return (await getAuth(request, env)) ? redirect("/app") : html(signupPage(Boolean(env.SIGNUP_CODE)));
+    }
+    if (pathname === "/app") {
+      const auth = await getAuth(request, env);
+      return auth ? html(appPage(auth)) : redirect("/login");
+    }
+  }
+
+  return json({ error: "Not found" }, 404);
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    try {
+      return await route(request, env);
+    } catch (err) {
+      if (err instanceof HttpError) return json({ error: err.message }, err.status);
+      console.error(err);
+      return json({ error: "Internal server error" }, 500);
+    }
+  },
+
+  // Cloudflare cron (see [triggers] in wrangler.toml): runs every hour.
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(runScheduler(env, new Date(controller.scheduledTime)));
+  },
+};
+'@
+
+Write-Host ""
+Write-Host "Phase 9 files written. Next steps are listed in the chat." -ForegroundColor Cyan

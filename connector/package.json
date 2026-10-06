@@ -1,6 +1,6 @@
 {
   "name": "zkt-connector",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,9 +8,6 @@
     "api-test": "node src/api-test.js",
     "read-device": "node src/read-device.js",
     "mock-device": "node test/mock-device.js",
-    "test": "node --test test/zk.test.js test/sync.test.js"
-  },
-  "dependencies": {
-    "dotenv": "^16.4.5"
+    "test": "node --test test/zk.test.js test/sync.test.js test/env.test.js"
   }
 }
