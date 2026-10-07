@@ -25,11 +25,10 @@ function envFile(apiBase: string, token: string, companyName: string, connectorN
     `API_BASE_URL=${apiBase}`,
     `CONNECTOR_TOKEN=${token}`,
     "",
-    "# How long to wait for the machine (ms), how often to check for sync jobs (s),",
-    "# and the first retry delay when the machine or server fails (s).",
+    "# How long to wait for the machine (ms), and the first retry delay when",
+    "# the machine or server fails (s). Syncs start within a few seconds.",
     "DEVICE_TIMEOUT_MS=10000",
-    "POLL_INTERVAL_SECONDS=60",
-    "RETRY_DELAY_SECONDS=10",
+    "RETRY_DELAY_SECONDS=5",
     "",
   ];
   return lines.join("\r\n");

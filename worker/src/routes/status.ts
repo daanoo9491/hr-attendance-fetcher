@@ -3,6 +3,7 @@ import type { Env } from "../env";
 import { json } from "../lib/http";
 import { requireAuth } from "../lib/auth";
 import { CONNECTOR_VERSION } from "../generated/connector-files";
+import { expireStaleJobs } from "../lib/jobs";
 
 const OFFLINE_MINUTES = 10;
 const CLOCK_WARN_SECONDS = 120;
@@ -27,6 +28,7 @@ function ago(iso: string, now: number): string {
 /** GET /api/status */
 export async function status(request: Request, env: Env): Promise<Response> {
   const auth = await requireAuth(request, env);
+  await expireStaleJobs(env, { companyId: auth.companyId });
   const now = Date.now();
   const alerts: Alert[] = [];
 

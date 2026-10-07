@@ -4,9 +4,11 @@ import type { Env } from "../env";
 import { HttpError, json, readJson } from "../lib/http";
 import { sha256Hex } from "../lib/crypto";
 import { finalizeReportIfDone } from "../scheduler";
+import { expireStaleJobs } from "../lib/jobs";
 
 const MAX_RECORDS_PER_UPLOAD = 1000;
-const STALE_JOB_MINUTES = 30;
+const MAX_WAIT_SECONDS = 25;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const TOKEN_RE = /^Bearer\s+(zkc_[A-Za-z0-9_-]{20,})$/;
 const TIMESTAMP_RE = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/;
 
@@ -65,41 +67,64 @@ export async function connectorConfig(request: Request, env: Env): Promise<Respo
   });
 }
 
-// ------------------------------------------------------------------ POST /api/connector/jobs/claim
-export async function claimJob(request: Request, env: Env): Promise<Response> {
-  const ctx = await requireConnector(request, env);
-  const now = new Date();
-  const staleBefore = new Date(now.getTime() - STALE_JOB_MINUTES * 60_000).toISOString();
-
-  // 1) Jobs this connector started but never finished are marked failed.
-  await env.DB.prepare(
+// ------------------------------------------------------------------ POST /api/connector/jobs/claim?wait=20
+// Long poll: when nothing is waiting, the request is held for up to `wait` seconds and
+// returns as soon as a job appears, so "Sync now" starts within about 2 seconds.
+async function takeJob(env: Env, ctx: ConnectorContext) {
+  const now = new Date().toISOString();
+  return env.DB.prepare(
     `UPDATE sync_jobs
-        SET status = 'failed', finished_at = ?, error_message = 'Timed out: connector did not report completion'
-      WHERE status = 'running' AND started_at < ?
-        AND device_id IN (SELECT id FROM devices WHERE connector_id = ?)`,
-  ).bind(now.toISOString(), staleBefore, ctx.connectorId).run();
-
-  // 2) Atomically take the oldest pending job for this connector's devices.
-  const job = await env.DB.prepare(
-    `UPDATE sync_jobs
-        SET status = 'running', started_at = ?
+        SET status = 'running', started_at = ?1, heartbeat_at = ?1,
+            progress_stage = 'connecting', progress_pct = 0, progress_msg = 'Connector picked up the sync'
       WHERE status = 'pending'
         AND id = (
           SELECT j.id FROM sync_jobs j JOIN devices d ON d.id = j.device_id
-           WHERE j.status = 'pending' AND j.company_id = ? AND d.connector_id = ? AND d.is_active = 1
+           WHERE j.status = 'pending' AND j.company_id = ?2 AND d.connector_id = ?3 AND d.is_active = 1
            ORDER BY j.requested_at
            LIMIT 1)
       RETURNING id, device_id, trigger_type, requested_at, started_at`,
-  ).bind(now.toISOString(), ctx.companyId, ctx.connectorId)
+  ).bind(now, ctx.companyId, ctx.connectorId)
     .first<{ id: string; device_id: string; trigger_type: string; requested_at: string; started_at: string }>();
+}
 
-  if (!job) return json({ job: null });
+export async function claimJob(request: Request, env: Env): Promise<Response> {
+  const ctx = await requireConnector(request, env);
+  const wait = Math.min(Math.max(Number(new URL(request.url).searchParams.get("wait")) || 0, 0), MAX_WAIT_SECONDS);
+  const deadline = Date.now() + wait * 1000;
+
+  await expireStaleJobs(env, { connectorId: ctx.connectorId });
+
+  let job = await takeJob(env, ctx);
+  while (!job && Date.now() < deadline) {
+    await sleep(2000);
+    job = await takeJob(env, ctx);
+  }
+  if (!job) return json({ job: null, waited: wait });
 
   const device = await env.DB.prepare(
     "SELECT id, name, model, ip_address, port, comm_key, last_sync_at FROM devices WHERE id = ?",
   ).bind(job.device_id).first();
 
   return json({ job: { ...job, device } });
+}
+
+// ------------------------------------------------------------------ POST /api/connector/jobs/:id/progress
+// The connector reports what it is doing. The answer tells it whether to stop (job cancelled or timed out).
+export async function jobProgress(request: Request, env: Env, jobId: string): Promise<Response> {
+  const ctx = await requireConnector(request, env);
+  const job = await loadOwnJob(env, ctx, jobId);
+  if (job.status !== "running") return json({ ok: false, stop: true, status: job.status });
+
+  const body = await readJson<Record<string, unknown>>(request);
+  const stage = typeof body.stage === "string" ? body.stage.slice(0, 20) : null;
+  const pct = Number.isFinite(body.pct) ? Math.max(0, Math.min(100, Math.round(body.pct as number))) : null;
+  const message = typeof body.message === "string" ? body.message.replace(/[\u0000-\u001f]/g, " ").slice(0, 200) : null;
+
+  await env.DB.prepare(
+    `UPDATE sync_jobs SET heartbeat_at = ?, progress_stage = COALESCE(?, progress_stage), progress_pct = ?, progress_msg = COALESCE(?, progress_msg)
+      WHERE id = ? AND status = 'running'`,
+  ).bind(new Date().toISOString(), stage, pct, message, job.id).run();
+  return json({ ok: true, stop: false });
 }
 
 // ------------------------------------------------------------------ POST /api/connector/jobs/:id/logs
@@ -151,8 +176,8 @@ export async function uploadLogs(request: Request, env: Env, jobId: string): Pro
   }
 
   await env.DB.prepare(
-    "UPDATE sync_jobs SET records_fetched = records_fetched + ?, records_inserted = records_inserted + ? WHERE id = ?",
-  ).bind(clean.length, inserted, job.id).run();
+    "UPDATE sync_jobs SET records_fetched = records_fetched + ?, records_inserted = records_inserted + ?, heartbeat_at = ? WHERE id = ?",
+  ).bind(clean.length, inserted, new Date().toISOString(), job.id).run();
 
   return json({
     received: body.records.length,
@@ -187,8 +212,11 @@ export async function completeJob(request: Request, env: Env, jobId: string): Pr
 
   const now = new Date().toISOString();
   const statements = [
-    env.DB.prepare("UPDATE sync_jobs SET status = ?, finished_at = ?, error_message = ?, records_skipped = ? WHERE id = ?")
-      .bind(status, now, errorMessage, skipped, job.id),
+    env.DB.prepare(
+      `UPDATE sync_jobs SET status = ?, finished_at = ?, error_message = ?, records_skipped = ?,
+              progress_stage = NULL, progress_pct = NULL, progress_msg = NULL, heartbeat_at = ?
+        WHERE id = ?`,
+    ).bind(status, now, errorMessage, skipped, now, job.id),
   ];
   if (status === "success") {
     statements.push(

@@ -86,7 +86,7 @@ export function encodeRecords(records, recordSize = 40) {
 }
 
 /**
- * options: { records, recordSize=40, users, userRecordSize=72, refuseUsers, commKey=0, directLimit=1024, dataFrameSize=Infinity, serial }
+ * options: { records, recordSize=40, users, userRecordSize=72, refuseUsers, commKey=0, directLimit=1024, dataFrameSize=Infinity, serial, chunkDelayMs=0 }
  * Returns { server, port, received } - received lists every command code the client sent.
  */
 export function startMockDevice(options = {}) {
@@ -178,8 +178,10 @@ export function startMockDevice(options = {}) {
         } else {
           out.push(reply(CMD.ACK_ERROR, f.replyId)); // anything else is refused (and recorded)
         }
-        // Coalesce into one write, like real devices often do.
-        sock.write(Buffer.concat(out));
+        // Coalesce into one write, like real devices often do. Optional delay simulates a slow machine.
+        const delay = f.command === CMD.READ_BUFFER ? (options.chunkDelayMs ?? 0) : 0;
+        if (delay) setTimeout(() => sock.write(Buffer.concat(out)), delay);
+        else sock.write(Buffer.concat(out));
       }
     });
     sock.on("error", () => {});

@@ -36,6 +36,9 @@ try {
         }
     }
 
+    $menu = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\ZKT Connector"
+    if (Test-Path $menu) { Remove-Item $menu -Recurse -Force; Write-Host "Start Menu shortcuts removed." }
+
     if (Test-Path $Dest) {
         # Delete a few seconds later, so this window (which may run from that folder) can finish.
         Start-Process -FilePath "cmd.exe" -ArgumentList "/c ping -n 4 127.0.0.1 >nul & rmdir /s /q `"$Dest`"" -WindowStyle Hidden

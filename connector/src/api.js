@@ -1,5 +1,9 @@
 // HTTP client for the Attendance Fetcher Worker (connector side).
-export const CONNECTOR_VERSION = "0.8.0";
+// Every request has a time limit, so a bad network can never freeze the connector.
+export const CONNECTOR_VERSION = "0.9.0";
+
+const DEFAULT_TIMEOUT_MS = 30000;
+export const CLAIM_WAIT_SECONDS = 20;
 
 export class ApiClient {
   constructor(baseUrl, token) {
@@ -7,16 +11,27 @@ export class ApiClient {
     this.token = token;
   }
 
-  async request(method, path, body) {
-    const res = await fetch(this.baseUrl + path, {
-      method,
-      headers: {
-        authorization: `Bearer ${this.token}`,
-        "content-type": "application/json",
-        "x-connector-version": CONNECTOR_VERSION,
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+  async request(method, path, body, timeoutMs = DEFAULT_TIMEOUT_MS) {
+    let res;
+    try {
+      res = await fetch(this.baseUrl + path, {
+        method,
+        headers: {
+          authorization: `Bearer ${this.token}`,
+          "content-type": "application/json",
+          "x-connector-version": CONNECTOR_VERSION,
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (err) {
+      const timedOut = err && (err.name === "TimeoutError" || err.name === "AbortError");
+      const e = new Error(timedOut
+        ? `${method} ${path}: no answer from the server within ${Math.round(timeoutMs / 1000)} s`
+        : `${method} ${path}: cannot reach the server (${err.cause?.code ?? err.message})`);
+      e.network = true;
+      throw e;
+    }
 
     const text = await res.text();
     let data;
@@ -38,8 +53,14 @@ export class ApiClient {
     return this.request("GET", "/api/connector/config");
   }
 
-  claimJob() {
-    return this.request("POST", "/api/connector/jobs/claim", {});
+  /** Waits up to `waitSeconds` on the server for a job (long poll). */
+  claimJob(waitSeconds = CLAIM_WAIT_SECONDS) {
+    return this.request("POST", `/api/connector/jobs/claim?wait=${waitSeconds}`, {}, (waitSeconds + 20) * 1000);
+  }
+
+  /** Reports what the connector is doing. Resolves to { stop: true } when the job was cancelled. */
+  reportProgress(jobId, stage, pct, message) {
+    return this.request("POST", `/api/connector/jobs/${encodeURIComponent(jobId)}/progress`, { stage, pct, message }, 15000);
   }
 
   /** records: [{ user_id, timestamp: "YYYY-MM-DD HH:MM:SS", state, verify_mode }] (max 1000 per call) */

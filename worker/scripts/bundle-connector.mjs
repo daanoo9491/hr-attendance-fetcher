@@ -16,7 +16,8 @@ const CODE = [
 // Windows installer files (CRLF line endings, ASCII only).
 const WINDOWS = [
   "Install.cmd", "Uninstall.cmd", "Test-Connection.cmd", "README.txt",
-  "scripts/install.ps1", "scripts/uninstall.ps1",
+  "Start-Connector.cmd", "Stop-Connector.cmd", "Connector-Status.cmd",
+  "scripts/install.ps1", "scripts/uninstall.ps1", "scripts/service.ps1",
 ];
 
 const version = /CONNECTOR_VERSION = "([^"]+)"/.exec(fs.readFileSync(path.join(connector, "src/api.js"), "utf8"))?.[1];

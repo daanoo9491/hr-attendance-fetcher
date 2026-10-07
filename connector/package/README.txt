@@ -27,6 +27,14 @@ Installed to : C:\ProgramData\ZKTConnector
 Log file     : C:\ProgramData\ZKTConnector\logs\connector.log
 
 
+START, STOP AND STATUS
+----------------------
+After installing, use Start menu > ZKT Connector, or these files:
+  Start-Connector.cmd   start (or restart) the connector
+  Stop-Connector.cmd    stop it (it starts again when Windows restarts)
+  Connector-Status.cmd  is it running? shows the latest log lines
+
+
 CHECK THE MACHINE CONNECTION
 ----------------------------
 Double-click  Test-Connection.cmd  (in the extracted folder). It reads the

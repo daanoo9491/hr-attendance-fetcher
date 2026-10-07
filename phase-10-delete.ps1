@@ -1,3 +1,468 @@
+# =====================================================================
+# HR Auto Attendance Fetcher - PHASE 10 : Delete unused machines and connectors
+# Run from the ROOT of the repo (hr-attendance-fetcher):
+#   powershell -ExecutionPolicy Bypass -File .\phase-10-delete.ps1
+# =====================================================================
+$ErrorActionPreference = "Stop"
+
+function Write-File([string]$Path, [string]$Content) {
+    $full = Join-Path (Get-Location) $Path
+    $dir  = Split-Path $full -Parent
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    [System.IO.File]::WriteAllText($full, $Content.Replace("`r`n", "`n"), (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "  wrote $Path" -ForegroundColor Green
+}
+
+if (-not (Test-Path "worker/src/routes/overview.ts")) {
+    throw "Run this from the repo root, after Phase 9 (worker/src/routes/overview.ts not found)."
+}
+
+Write-Host "Phase 10: writing delete for machines and connectors..." -ForegroundColor Cyan
+
+# ---------------------------------------------------------------- worker/package.json
+Write-File "worker/package.json" @'
+{
+  "name": "hr-attendance-worker",
+  "version": "0.10.0",
+  "private": true,
+  "scripts": {
+    "bundle-connector": "node scripts/bundle-connector.mjs",
+    "dev": "npm run bundle-connector && wrangler dev",
+    "deploy": "npm run bundle-connector && wrangler deploy",
+    "typecheck": "npm run bundle-connector && tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261001.1",
+    "typescript": "^5.6.0",
+    "wrangler": "^4.0.0"
+  }
+}
+'@
+
+# ---------------------------------------------------------------- worker/src/env.ts
+Write-File "worker/src/env.ts" @'
+export interface Env {
+  DB: D1Database;
+  /** Optional. When set, sign-up requires this code (set with: wrangler secret put SIGNUP_CODE). */
+  SIGNUP_CODE?: string;
+}
+
+export const VERSION = "0.10.0-phase10";
+
+/** Number of files in worker/migrations. The health check reports "degraded" until all are applied. */
+export const EXPECTED_MIGRATIONS = 5;
+'@
+
+# ---------------------------------------------------------------- worker/src/routes/manage.ts
+Write-File "worker/src/routes/manage.ts" @'
+// Dashboard (session-authenticated) API: connectors, devices, sync jobs.
+// Every query is filtered by auth.companyId, so tenants never see each other's data.
+import type { Env } from "../env";
+import { HttpError, json, readJson } from "../lib/http";
+import { requireAuth, requireRole } from "../lib/auth";
+import { randomToken, sha256Hex } from "../lib/crypto";
+
+const IPV4 = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+
+function cleanText(value: unknown, field: string, max = 80): string {
+  const v = typeof value === "string" ? value.trim() : "";
+  if (v.length < 2) throw new HttpError(400, `${field} is required`);
+  if (v.length > max) throw new HttpError(400, `${field} is too long`);
+  return v;
+}
+
+function cleanInt(value: unknown, field: string, min: number, max: number, fallback: number): number {
+  if (value === undefined || value === null || value === "") return fallback;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < min || n > max) {
+    throw new HttpError(400, `${field} must be a whole number between ${min} and ${max}`);
+  }
+  return n;
+}
+
+// ------------------------------------------------------------------ connectors
+
+/** GET /api/connectors */
+export async function listConnectors(request: Request, env: Env): Promise<Response> {
+  const auth = await requireAuth(request, env);
+  const { results } = await env.DB.prepare(
+    `SELECT c.id, c.name, c.token_hint, c.version, c.last_seen_at, c.is_active, c.created_at,
+            (SELECT COUNT(*) FROM devices d WHERE d.connector_id = c.id AND d.is_active = 1) AS device_count
+       FROM connectors c
+      WHERE c.company_id = ?
+      ORDER BY c.is_active DESC, c.created_at DESC`,
+  ).bind(auth.companyId).all();
+  return json({ connectors: results ?? [] });
+}
+
+/** POST /api/connectors  { name } -> returns the token ONCE */
+export async function createConnector(request: Request, env: Env): Promise<Response> {
+  const auth = await requireAuth(request, env);
+  requireRole(auth, ["owner", "admin"]);
+  const body = await readJson<Record<string, unknown>>(request);
+  const name = cleanText(body.name, "Connector name");
+
+  const id = crypto.randomUUID();
+  const token = `zkc_${randomToken(32)}`;
+  await env.DB.prepare(
+    "INSERT INTO connectors (id, company_id, name, token_hash, token_hint) VALUES (?, ?, ?, ?, ?)",
+  ).bind(id, auth.companyId, name, await sha256Hex(token), token.slice(-4)).run();
+
+  return json(
+    {
+      connector: { id, name },
+      token,
+      note: "Copy this token into connector/.env as CONNECTOR_TOKEN. It will not be shown again.",
+    },
+    201,
+  );
+}
+
+/** POST /api/connectors/:id/revoke */
+export async function revokeConnector(request: Request, env: Env, id: string): Promise<Response> {
+  const auth = await requireAuth(request, env);
+  requireRole(auth, ["owner", "admin"]);
+  const res = await env.DB.prepare("UPDATE connectors SET is_active = 0 WHERE id = ? AND company_id = ?")
+    .bind(id, auth.companyId).run();
+  if (!res.meta.changes) throw new HttpError(404, "Connector not found");
+  return json({ ok: true });
+}
+
+// ------------------------------------------------------------------ devices
+
+/** GET /api/devices */
+export async function listDevices(request: Request, env: Env): Promise<Response> {
+  const auth = await requireAuth(request, env);
+  const { results } = await env.DB.prepare(
+    `SELECT d.id, d.name, d.model, d.ip_address, d.port, d.comm_key, d.serial_number,
+            d.connector_id, c.name AS connector_name, c.is_active AS connector_active,
+            d.last_sync_at, d.clock_offset_seconds, d.clock_checked_at, d.is_active, d.created_at,
+            (SELECT COUNT(*) FROM attendance_logs l WHERE l.device_id = d.id) AS log_count,
+            (SELECT j.status FROM sync_jobs j WHERE j.device_id = d.id ORDER BY j.requested_at DESC LIMIT 1) AS last_job_status
+       FROM devices d
+       LEFT JOIN connectors c ON c.id = d.connector_id
+      WHERE d.company_id = ?
+      ORDER BY d.is_active DESC, d.created_at DESC`,
+  ).bind(auth.companyId).all();
+  return json({ devices: results ?? [] });
+}
+
+/** POST /api/devices  { name, ip_address, port?, comm_key?, model?, connector_id? } */
+export async function createDevice(request: Request, env: Env): Promise<Response> {
+  const auth = await requireAuth(request, env);
+  requireRole(auth, ["owner", "admin"]);
+  const body = await readJson<Record<string, unknown>>(request);
+
+  const name = cleanText(body.name, "Device name");
+  const ip = typeof body.ip_address === "string" ? body.ip_address.trim() : "";
+  if (!IPV4.test(ip)) throw new HttpError(400, "A valid IPv4 address is required (e.g. 192.168.10.21)");
+  const port = cleanInt(body.port, "Port", 1, 65535, 4370);
+  const commKey = cleanInt(body.comm_key, "Comm key", 0, 999999, 0);
+  const model = typeof body.model === "string" && body.model.trim() ? cleanText(body.model, "Model", 40) : "K50";
+
+  let connectorId: string | null = null;
+  if (typeof body.connector_id === "string" && body.connector_id) {
+    const ok = await env.DB.prepare("SELECT 1 FROM connectors WHERE id = ? AND company_id = ? AND is_active = 1")
+      .bind(body.connector_id, auth.companyId).first();
+    if (!ok) throw new HttpError(400, "Connector not found or revoked");
+    connectorId = body.connector_id;
+  }
+
+  const id = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO devices (id, company_id, connector_id, name, model, ip_address, port, comm_key)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(id, auth.companyId, connectorId, name, model, ip, port, commKey).run();
+
+  return json({ device: { id, name } }, 201);
+}
+
+/** POST /api/devices/:id/deactivate (data is kept; pending jobs are cancelled) */
+export async function deactivateDevice(request: Request, env: Env, id: string): Promise<Response> {
+  const auth = await requireAuth(request, env);
+  requireRole(auth, ["owner", "admin"]);
+  const now = new Date().toISOString();
+  const [res] = await env.DB.batch([
+    env.DB.prepare("UPDATE devices SET is_active = 0 WHERE id = ? AND company_id = ?").bind(id, auth.companyId),
+    env.DB.prepare(
+      `UPDATE sync_jobs SET status = 'failed', finished_at = ?, error_message = 'Device deactivated'
+        WHERE device_id = ? AND company_id = ? AND status = 'pending'`,
+    ).bind(now, id, auth.companyId),
+  ]);
+  if (!res.meta.changes) throw new HttpError(404, "Device not found");
+  return json({ ok: true });
+}
+
+// ------------------------------------------------------------------ sync jobs
+
+/** POST /api/devices/:id/sync - queue a manual sync (one open job per device). */
+export async function queueSync(request: Request, env: Env, id: string): Promise<Response> {
+  const auth = await requireAuth(request, env);
+  requireRole(auth, ["owner", "admin"]);
+
+  const device = await env.DB.prepare(
+    `SELECT d.id, d.is_active, d.connector_id, c.is_active AS connector_active
+       FROM devices d LEFT JOIN connectors c ON c.id = d.connector_id
+      WHERE d.id = ? AND d.company_id = ?`,
+  ).bind(id, auth.companyId).first<{ id: string; is_active: number; connector_id: string | null; connector_active: number | null }>();
+
+  if (!device) throw new HttpError(404, "Device not found");
+  if (device.is_active !== 1) throw new HttpError(409, "Device is deactivated");
+  if (!device.connector_id || device.connector_active !== 1) {
+    throw new HttpError(409, "Assign an active connector to this device first");
+  }
+
+  const open = await env.DB.prepare(
+    "SELECT id, status FROM sync_jobs WHERE device_id = ? AND status IN ('pending','running') LIMIT 1",
+  ).bind(id).first<{ id: string; status: string }>();
+  if (open) return json({ job: open, already_queued: true });
+
+  const jobId = crypto.randomUUID();
+  await env.DB.prepare(
+    "INSERT INTO sync_jobs (id, company_id, device_id, trigger_type, status) VALUES (?, ?, ?, 'manual', 'pending')",
+  ).bind(jobId, auth.companyId, id).run();
+  return json({ job: { id: jobId, status: "pending" }, already_queued: false }, 201);
+}
+
+/** GET /api/sync-jobs?limit=20 */
+export async function listSyncJobs(request: Request, env: Env): Promise<Response> {
+  const auth = await requireAuth(request, env);
+  const limit = Math.min(Math.max(Number(new URL(request.url).searchParams.get("limit")) || 20, 1), 100);
+  const { results } = await env.DB.prepare(
+    `SELECT j.id, j.device_id, d.name AS device_name, j.trigger_type, j.status,
+            j.requested_at, j.started_at, j.finished_at, j.records_fetched, j.records_inserted, j.records_skipped, j.error_message
+       FROM sync_jobs j JOIN devices d ON d.id = j.device_id
+      WHERE j.company_id = ?
+      ORDER BY j.requested_at DESC
+      LIMIT ?`,
+  ).bind(auth.companyId, limit).all();
+  return json({ jobs: results ?? [] });
+}
+
+/** POST /api/devices/sync-all - queue a manual sync for every active device that has an active connector. */
+export async function syncAll(request: Request, env: Env): Promise<Response> {
+  const auth = await requireAuth(request, env);
+  requireRole(auth, ["owner", "admin"]);
+  const { results } = await env.DB.prepare(
+    `SELECT d.id,
+            (SELECT 1 FROM sync_jobs j WHERE j.device_id = d.id AND j.status IN ('pending','running') LIMIT 1) AS open
+       FROM devices d JOIN connectors c ON c.id = d.connector_id
+      WHERE d.company_id = ? AND d.is_active = 1 AND c.is_active = 1`,
+  ).bind(auth.companyId).all<{ id: string; open: number | null }>();
+
+  const devices = results ?? [];
+  const toQueue = devices.filter((d) => !d.open);
+  if (toQueue.length) {
+    await env.DB.batch(toQueue.map((d) =>
+      env.DB.prepare(
+        "INSERT INTO sync_jobs (id, company_id, device_id, trigger_type, status) VALUES (?, ?, ?, 'manual', 'pending')",
+      ).bind(crypto.randomUUID(), auth.companyId, d.id)));
+  }
+  return json({ devices: devices.length, queued: toQueue.length, already_queued: devices.length - toQueue.length });
+}
+
+// ------------------------------------------------------------------ delete (clean-up of unused items)
+
+/**
+ * DELETE /api/devices/:id   { move_to?: deviceId, delete_punches?: true }
+ * Only deactivated machines. If it has punches, the caller must either move them
+ * to another machine of the company or explicitly delete them.
+ */
+export async function deleteDevice(request: Request, env: Env, id: string): Promise<Response> {
+  const auth = await requireAuth(request, env);
+  requireRole(auth, ["owner", "admin"]);
+  const body = await readJson<{ move_to?: unknown; delete_punches?: unknown }>(request);
+
+  const device = await env.DB.prepare("SELECT id, name, is_active FROM devices WHERE id = ? AND company_id = ?")
+    .bind(id, auth.companyId).first<{ id: string; name: string; is_active: number }>();
+  if (!device) throw new HttpError(404, "Machine not found");
+  if (device.is_active === 1) throw new HttpError(409, "Deactivate the machine before deleting it");
+
+  const count = (await env.DB.prepare("SELECT COUNT(*) AS n FROM attendance_logs WHERE device_id = ?")
+    .bind(id).first<{ n: number }>())?.n ?? 0;
+
+  const statements: D1PreparedStatement[] = [];
+  let moved = 0;
+  if (count > 0) {
+    if (typeof body.move_to === "string" && body.move_to) {
+      if (body.move_to === id) throw new HttpError(400, "Choose a different machine to move the punches to");
+      const target = await env.DB.prepare("SELECT id FROM devices WHERE id = ? AND company_id = ?")
+        .bind(body.move_to, auth.companyId).first();
+      if (!target) throw new HttpError(400, "The machine to move the punches to was not found");
+      // Punches the target already has (same person, same time) are dropped as duplicates.
+      statements.push(
+        env.DB.prepare("UPDATE OR IGNORE attendance_logs SET device_id = ?, sync_job_id = NULL WHERE device_id = ?")
+          .bind(body.move_to, id),
+      );
+      moved = count;
+    } else if (body.delete_punches !== true) {
+      throw new HttpError(409, `This machine has ${count} punches. Move them to another machine or confirm deleting them.`);
+    }
+  }
+  statements.push(
+    env.DB.prepare("DELETE FROM attendance_logs WHERE device_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM sync_jobs WHERE device_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM devices WHERE id = ? AND company_id = ?").bind(id, auth.companyId),
+  );
+  const results = await env.DB.batch(statements);
+  const movedRows = moved ? (results[0].meta.changes ?? 0) : 0;
+
+  return json({ ok: true, punches: count, moved: movedRows, deleted_punches: count - movedRows });
+}
+
+/**
+ * DELETE /api/connectors/:id
+ * Allowed for revoked connectors, and for connectors that never connected and have no machines.
+ */
+export async function deleteConnector(request: Request, env: Env, id: string): Promise<Response> {
+  const auth = await requireAuth(request, env);
+  requireRole(auth, ["owner", "admin"]);
+
+  const c = await env.DB.prepare(
+    `SELECT c.id, c.is_active, c.last_seen_at,
+            (SELECT COUNT(*) FROM devices d WHERE d.connector_id = c.id AND d.is_active = 1) AS devices
+       FROM connectors c WHERE c.id = ? AND c.company_id = ?`,
+  ).bind(id, auth.companyId).first<{ id: string; is_active: number; last_seen_at: string | null; devices: number }>();
+  if (!c) throw new HttpError(404, "Connector not found");
+  if (c.is_active === 1 && (c.last_seen_at || c.devices > 0)) {
+    throw new HttpError(409, c.devices > 0
+      ? "This connector still reads a machine. Revoke it (or move the machine to another connector) first."
+      : "This connector has been used. Revoke it first, then delete it.");
+  }
+
+  await env.DB.batch([
+    env.DB.prepare("UPDATE devices SET connector_id = NULL WHERE connector_id = ? AND company_id = ?").bind(id, auth.companyId),
+    env.DB.prepare("DELETE FROM connectors WHERE id = ? AND company_id = ?").bind(id, auth.companyId),
+  ]);
+  return json({ ok: true });
+}
+'@
+
+# ---------------------------------------------------------------- worker/src/index.ts
+Write-File "worker/src/index.ts" @'
+import type { Env } from "./env";
+import { HttpError, html, json, redirect } from "./lib/http";
+import { getAuth } from "./lib/auth";
+import { health } from "./routes/health";
+import { login, logout, me, signup } from "./routes/auth";
+import {
+  createConnector, createDevice, deactivateDevice, listConnectors,
+  listDevices, listSyncJobs, queueSync, revokeConnector, syncAll, deleteDevice, deleteConnector,
+} from "./routes/manage";
+import { downloadConnector } from "./routes/download";
+import { status } from "./routes/status";
+import { overview } from "./routes/overview";
+import { claimJob, completeJob, connectorConfig, uploadLogs, uploadUsers } from "./routes/connector";
+import { listEmployees, saveEmployee } from "./routes/employees";
+import { downloadReport, exportRange, listReports } from "./routes/reports";
+import { runScheduler } from "./scheduler";
+import { appPage, loginPage, signupPage } from "./pages";
+
+export type { Env };
+
+const ID = "([0-9a-f-]{36})";
+const R_CONNECTOR_REVOKE = new RegExp(`^/api/connectors/${ID}/revoke$`);
+const R_DEVICE_DEACTIVATE = new RegExp(`^/api/devices/${ID}/deactivate$`);
+const R_DEVICE_SYNC = new RegExp(`^/api/devices/${ID}/sync$`);
+const R_JOB_LOGS = new RegExp(`^/api/connector/jobs/${ID}/logs$`);
+const R_JOB_COMPLETE = new RegExp(`^/api/connector/jobs/${ID}/complete$`);
+const R_REPORT_DOWNLOAD = new RegExp(`^/api/reports/${ID}/download$`);
+const R_JOB_USERS = new RegExp(`^/api/connector/jobs/${ID}/users$`);
+const R_EMPLOYEE = /^\/api\/employees\/([^/]{1,100})$/;
+const R_CONNECTOR_PACKAGE = new RegExp(`^/api/connectors/${ID}/package$`);
+const R_DEVICE = new RegExp(`^/api/devices/${ID}$`);
+const R_CONNECTOR = new RegExp(`^/api/connectors/${ID}$`);
+
+function safeDecode(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    throw new HttpError(400, "Invalid URL");
+  }
+}
+
+async function route(request: Request, env: Env): Promise<Response> {
+  const { pathname } = new URL(request.url);
+  const method = request.method;
+  let m: RegExpExecArray | null;
+
+  // ---- Public / auth
+  if (pathname === "/api/health" && method === "GET") return health(env);
+  if (pathname === "/api/auth/signup" && method === "POST") return signup(request, env);
+  if (pathname === "/api/auth/login" && method === "POST") return login(request, env);
+  if (pathname === "/api/auth/logout" && method === "POST") return logout(request, env);
+  if (pathname === "/api/auth/me" && method === "GET") return me(request, env);
+
+  // ---- Dashboard API (browser session)
+  if (pathname === "/api/connectors" && method === "GET") return listConnectors(request, env);
+  if (pathname === "/api/connectors" && method === "POST") return createConnector(request, env);
+  if (method === "POST" && (m = R_CONNECTOR_REVOKE.exec(pathname))) return revokeConnector(request, env, m[1]);
+  if (method === "POST" && (m = R_CONNECTOR_PACKAGE.exec(pathname))) return downloadConnector(request, env, m[1]);
+  if (method === "DELETE" && (m = R_CONNECTOR.exec(pathname))) return deleteConnector(request, env, m[1]);
+  if (method === "DELETE" && (m = R_DEVICE.exec(pathname))) return deleteDevice(request, env, m[1]);
+  if (pathname === "/api/devices" && method === "GET") return listDevices(request, env);
+  if (pathname === "/api/devices" && method === "POST") return createDevice(request, env);
+  if (pathname === "/api/devices/sync-all" && method === "POST") return syncAll(request, env);
+  if (method === "POST" && (m = R_DEVICE_DEACTIVATE.exec(pathname))) return deactivateDevice(request, env, m[1]);
+  if (method === "POST" && (m = R_DEVICE_SYNC.exec(pathname))) return queueSync(request, env, m[1]);
+  if (pathname === "/api/sync-jobs" && method === "GET") return listSyncJobs(request, env);
+  if (pathname === "/api/status" && method === "GET") return status(request, env);
+  if (pathname === "/api/overview" && method === "GET") return overview(request, env);
+  if (pathname === "/api/reports" && method === "GET") return listReports(request, env);
+  if (method === "GET" && (m = R_REPORT_DOWNLOAD.exec(pathname))) return downloadReport(request, env, m[1]);
+  if (pathname === "/api/export.xlsx" && method === "GET") return exportRange(request, env);
+  if (pathname === "/api/employees" && method === "GET") return listEmployees(request, env);
+  if (method === "PUT" && (m = R_EMPLOYEE.exec(pathname))) return saveEmployee(request, env, safeDecode(m[1]));
+
+  // ---- ZKT Connector API (Bearer token)
+  if (pathname === "/api/connector/config" && method === "GET") return connectorConfig(request, env);
+  if (pathname === "/api/connector/jobs/claim" && method === "POST") return claimJob(request, env);
+  if (method === "POST" && (m = R_JOB_LOGS.exec(pathname))) return uploadLogs(request, env, m[1]);
+  if (method === "POST" && (m = R_JOB_USERS.exec(pathname))) return uploadUsers(request, env, m[1]);
+  if (method === "POST" && (m = R_JOB_COMPLETE.exec(pathname))) return completeJob(request, env, m[1]);
+
+  if (pathname.startsWith("/api/")) return json({ error: "Not found" }, 404);
+
+  // ---- Pages
+  if (method === "GET") {
+    if (pathname === "/") {
+      return redirect((await getAuth(request, env)) ? "/app" : "/login");
+    }
+    if (pathname === "/login") {
+      return (await getAuth(request, env)) ? redirect("/app") : html(loginPage());
+    }
+    if (pathname === "/signup") {
+      return (await getAuth(request, env)) ? redirect("/app") : html(signupPage(Boolean(env.SIGNUP_CODE)));
+    }
+    if (pathname === "/app") {
+      const auth = await getAuth(request, env);
+      return auth ? html(appPage(auth)) : redirect("/login");
+    }
+  }
+
+  return json({ error: "Not found" }, 404);
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    try {
+      return await route(request, env);
+    } catch (err) {
+      if (err instanceof HttpError) return json({ error: err.message }, err.status);
+      console.error(err);
+      return json({ error: "Internal server error" }, 500);
+    }
+  },
+
+  // Cloudflare cron (see [triggers] in wrangler.toml): runs every hour.
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(runScheduler(env, new Date(controller.scheduledTime)));
+  },
+};
+'@
+
+# ---------------------------------------------------------------- worker/src/pages.ts
+Write-File "worker/src/pages.ts" @'
 import { VERSION } from "./env";
 import type { AuthContext } from "./lib/auth";
 import { escapeHtml } from "./lib/http";
@@ -199,17 +664,6 @@ td.empty { color:var(--muted); padding:28px 14px; text-align:center; white-space
 .setup summary { cursor:pointer; }
 .setup code { display:block; margin:8px 0; padding:8px 10px; border-radius:6px; background:var(--surface); word-break:break-all; font-size:12.5px; }
 .search { max-width:260px; }
-
-/* ---------- live sync progress */
-.prog { display:flex; flex-direction:column; gap:5px; min-width:200px; max-width:300px; white-space:normal; }
-.prog-text { font-size:13px; color:var(--ink-2); line-height:1.35; }
-.prog-bar { height:6px; border-radius:3px; background:var(--line-2); overflow:hidden; position:relative; }
-.prog-bar > span { display:block; height:100%; background:var(--accent); border-radius:3px; transition:width .4s ease; }
-.prog-bar.busy > span { width:35% !important; position:absolute; animation:prog-slide 1.3s ease-in-out infinite; }
-@keyframes prog-slide { from { left:-35%; } to { left:100%; } }
-.prog-meta { font-size:12px; color:var(--muted); }
-.fail-text { display:block; margin-top:4px; font-size:12.5px; color:var(--red); white-space:normal; min-width:220px; max-width:320px; line-height:1.35; }
-tr.syncing td { background:color-mix(in srgb, var(--accent-soft) 45%, transparent); }
 
 /* ---------- dialog */
 dialog.dlg {
@@ -552,7 +1006,7 @@ export function appPage(auth: AuthContext): string {
             <div class="error-text" id="d_msg" style="margin-top:8px"></div>
           </div>
           <div class="table-wrap"><table>
-            <thead><tr><th>Machine</th><th>Last sync</th><th>Clock</th><th class="num">Punches</th><th>Connector</th><th></th></tr></thead>
+            <thead><tr><th>Machine</th><th>Last sync</th><th>Clock</th><th class="num">Punches stored</th><th>Connector</th><th>Serial</th><th></th></tr></thead>
             <tbody id="d_rows"></tbody>
           </table></div>
         </div>
@@ -566,7 +1020,7 @@ export function appPage(auth: AuthContext): string {
       </div>
       <div class="panel">
         <div class="table-wrap" style="margin-top:0;border-top:0;border-radius:12px"><table>
-          <thead><tr><th>Requested</th><th>Machine</th><th>Started by</th><th>Status</th><th class="num">Read</th><th class="num">New</th><th class="num">Skipped</th><th>Finished</th><th>Details</th><th></th></tr></thead>
+          <thead><tr><th>Requested</th><th>Machine</th><th>Started by</th><th>Status</th><th class="num">Read</th><th class="num">New</th><th class="num">Skipped</th><th>Finished</th><th>Problem</th></tr></thead>
           <tbody id="j_rows"></tbody>
         </table></div>
       </div>
@@ -1020,70 +1474,34 @@ function clockText(sec) {
   var t = a < 5400 ? Math.round(a / 60) + " min" : a < 172800 ? Math.round(a / 3600) + " h" : Math.round(a / 86400) + " days";
   return { t: t + (sec < 0 ? " slow" : " fast"), k: "warn" };
 }
-var devicesTimer = null;
-function syncCell(d, active) {
-  var c = el("td");
-  var st = d.last_job_status;
-  if (!d.is_active) { c.appendChild(el("span", "pill idle", "Inactive")); return c; }
-  if (active) {
-    var box = el("div", "prog");
-    var waitingFor = st === "pending" ? Math.round((Date.now() - new Date(d.job_requested_at).getTime()) / 1000) : 0;
-    var text = st === "pending"
-      ? (d.connector_seen && Date.now() - new Date(d.connector_seen).getTime() < 120000
-          ? "Starting\u2026 the connector picks this up in a few seconds"
-          : "Waiting for the connector. It looks offline: check that the office PC is on.")
-      : (d.job_msg || "Syncing\u2026");
-    box.appendChild(el("div", "prog-text", text));
-    var bar = el("div", "prog-bar" + (d.job_pct === null || d.job_pct === undefined || st === "pending" || d.job_stage === "retrying" ? " busy" : ""));
-    var fill = el("span"); fill.style.width = (d.job_pct || 0) + "%"; bar.appendChild(fill);
-    box.appendChild(bar);
-    if (st === "pending" && waitingFor > 20) box.appendChild(el("div", "prog-meta", "Waiting " + waitingFor + " s. It stops by itself after 10 minutes."));
-    c.appendChild(box);
-    return c;
-  }
-  if (st === "failed") {
-    c.appendChild(el("span", "pill bad", "Failed " + (d.job_finished_at ? ago(d.job_finished_at).toLowerCase() : "")));
-    if (d.job_error) { var f = el("span", "fail-text", d.job_error); f.title = d.job_error; c.appendChild(f); }
-    return c;
-  }
-  c.appendChild(el("span", "pill " + (st === "success" ? "ok" : "idle"), d.last_sync_at ? ago(d.last_sync_at) : "Never"));
-  if (st === "success" && d.job_new !== null && d.job_new !== undefined) c.appendChild(el("span", "sub-id", d.job_new + " new punches"));
-  return c;
-}
-
 async function loadDevices() {
-  var anyActive = false;
   var data = await api("GET", "/api/devices");
   var tbody = document.getElementById("d_rows");
   tbody.textContent = "";
   devicesData = data.devices;
   document.getElementById("count_machines").textContent = data.devices.filter(function (d) { return d.is_active; }).length || "";
-  if (!data.devices.length) emptyRow(tbody, 6, "No machines yet. Add your attendance machine above.");
+  if (!data.devices.length) emptyRow(tbody, 7, "No machines yet. Add your attendance machine above.");
   data.devices.forEach(function (d) {
     var tr = el("tr");
     var name = el("td"); name.appendChild(document.createTextNode(d.name));
     name.appendChild(el("span", "sub-id", d.ip_address + ":" + d.port + (d.is_active ? "" : " \u00b7 deactivated")));
-    if (d.serial_number) name.appendChild(el("span", "sub-id", "Serial " + d.serial_number));
     tr.appendChild(name);
     var st = d.last_job_status;
-    var active = d.is_active && (st === "pending" || st === "running");
-    if (active) { anyActive = true; tr.className = "syncing"; }
-    tr.appendChild(syncCell(d, active));
+    var syncCell = el("td");
+    syncCell.appendChild(el("span", "pill " + (!d.is_active ? "idle" : st === "success" ? "ok" : st === "failed" ? "bad" : st ? "warn" : "idle"),
+      !d.is_active ? "Inactive" : st === "failed" ? "Failed" : st === "pending" ? "Waiting" : st === "running" ? "Syncing" : d.last_sync_at ? ago(d.last_sync_at) : "Never"));
+    tr.appendChild(syncCell);
     var ck = clockText(d.clock_offset_seconds);
     tr.appendChild(ck ? pill(ck.t, ck.k) : td(""));
     tr.appendChild(td(d.log_count, "num"));
     tr.appendChild(td(d.connector_name, "muted"));
+    tr.appendChild(td(d.serial_number, "muted"));
     var actions = el("td", "actions");
-    if (CAN_MANAGE && active) {
-      actions.appendChild(btn("Stop", "btn-danger", async function () {
-        try { await api("POST", "/api/sync-jobs/" + d.job_id + "/cancel", {}); toast("Stopped the sync of " + d.name); await refreshMachines(); }
-        catch (err) { toast(err.message); await refreshMachines(); }
-      }));
-    } else if (CAN_MANAGE && d.is_active) {
+    if (CAN_MANAGE && d.is_active) {
       actions.appendChild(btn("Sync now", "btn-ghost", async function () {
         try {
           var r = await api("POST", "/api/devices/" + d.id + "/sync", {});
-          toast(r.already_queued ? "A sync for " + d.name + " is already running." : "Sync started. Progress is shown here.");
+          toast(r.already_queued ? "A sync for " + d.name + " is already " + r.job.status + "." : "Sync queued. The connector picks it up within a minute.");
           await refreshMachines();
         } catch (err) { setText("d_msg", err.message); }
       }));
@@ -1096,17 +1514,7 @@ async function loadDevices() {
     tr.appendChild(actions);
     tbody.appendChild(tr);
   });
-  // While a sync runs, refresh every 1.5 s to show live progress; then refresh the rest once.
-  clearTimeout(devicesTimer);
-  if (anyActive) {
-    devicesTimer = setTimeout(function () { quiet(loadDevices()); }, 1500);
-    wasActive = true;
-  } else if (wasActive) {
-    wasActive = false;
-    quiet(loadJobs()); quiet(loadStatus()); quiet(loadEmployees()); if (ovDate === ovToday) quiet(loadOverview());
-  }
 }
-var wasActive = false;
 
 function deleteMachine(d) {
   var punches = Number(d.log_count) || 0;
@@ -1168,8 +1576,7 @@ async function loadJobs() {
   var data = await api("GET", "/api/sync-jobs?limit=30");
   var tbody = document.getElementById("j_rows");
   tbody.textContent = "";
-  if (!data.jobs.length) emptyRow(tbody, 10, "No syncs yet. Click Sync now on a machine, or wait for the scheduled sync.");
-  var anyActive = false;
+  if (!data.jobs.length) emptyRow(tbody, 9, "No syncs yet. Click Sync now on a machine, or wait for the scheduled sync.");
   var LABEL = { success: ["Done", "ok"], failed: ["Failed", "bad"], pending: ["Waiting", "warn"], running: ["Syncing", "warn"] };
   data.jobs.forEach(function (j) {
     var tr = el("tr");
@@ -1182,29 +1589,17 @@ async function loadJobs() {
     tr.appendChild(td(j.status === "success" ? j.records_inserted : "", "num"));
     tr.appendChild(td(j.records_skipped || "", j.records_skipped ? "num t-warn" : "num muted"));
     tr.appendChild(td(j.finished_at ? when(j.finished_at) : ""));
-    var isActive = j.status === "pending" || j.status === "running";
-    if (isActive) anyActive = true;
-    tr.appendChild(td(isActive ? (j.progress_msg || (j.status === "pending" ? "Waiting for the connector" : "Syncing")) + (j.progress_pct !== null && j.progress_pct !== undefined && j.status === "running" ? " (" + j.progress_pct + "%)" : "") : j.error_message,
-      isActive ? "wrap muted" : j.error_message ? "wrap t-bad" : "muted"));
-    var act = el("td", "actions");
-    if (CAN_MANAGE && isActive) act.appendChild(btn("Stop", "btn-danger", async function () {
-      try { await api("POST", "/api/sync-jobs/" + j.id + "/cancel", {}); toast("Sync stopped"); } catch (err) { toast(err.message); }
-      quiet(loadJobs()); quiet(loadDevices());
-    }));
-    tr.appendChild(act);
+    tr.appendChild(td(j.error_message, j.error_message ? "wrap t-bad" : "muted"));
     tbody.appendChild(tr);
   });
-  clearTimeout(jobsTimer);
-  if (anyActive) jobsTimer = setTimeout(function () { quiet(loadJobs()); }, 2000);
 }
-var jobsTimer = null;
 
 /* ---------- sync all */
 async function syncAllNow(b) {
   b.disabled = true;
   try {
     var r = await api("POST", "/api/devices/sync-all", {});
-    toast(r.devices ? (r.queued ? "Sync started for " + r.queued + " machine" + (r.queued > 1 ? "s" : "") + ". Progress is shown under Machines." : "Already syncing.") : "No machine has an active connector yet.");
+    toast(r.devices ? (r.queued ? r.queued + " machine" + (r.queued > 1 ? "s" : "") + " queued. The connector picks them up within a minute." : "Already syncing.") : "No machine has an active connector yet.");
     await refreshAll();
   } catch (err) { toast(err.message); }
   b.disabled = false;
@@ -1232,3 +1627,7 @@ setInterval(function () {
   if (ovDate === ovToday) quiet(loadOverview());
 }, 20000);
 </script>`;
+'@
+
+Write-Host ""
+Write-Host "Phase 10 files written. Deploy with: cd worker; npm run deploy" -ForegroundColor Cyan

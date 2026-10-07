@@ -5,6 +5,7 @@
 import type { Env } from "./env";
 import { localNow, nextPeriod } from "./lib/dates";
 import { attendanceStats } from "./report";
+import { expireStaleJobs } from "./lib/jobs";
 
 const MAX_COLLECT_MINUTES = 180;
 
@@ -24,6 +25,7 @@ interface ReportRow {
 }
 
 export async function runScheduler(env: Env, now = new Date()): Promise<void> {
+  await expireStaleJobs(env, {}, now);
   const { results } = await env.DB.prepare(
     "SELECT id, timezone, report_every_days, report_hour FROM companies WHERE status = 'active'",
   ).all<CompanyRow>();

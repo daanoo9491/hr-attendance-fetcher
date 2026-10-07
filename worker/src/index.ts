@@ -5,12 +5,12 @@ import { health } from "./routes/health";
 import { login, logout, me, signup } from "./routes/auth";
 import {
   createConnector, createDevice, deactivateDevice, listConnectors,
-  listDevices, listSyncJobs, queueSync, revokeConnector, syncAll,
+  listDevices, listSyncJobs, queueSync, revokeConnector, syncAll, deleteDevice, deleteConnector, cancelJob,
 } from "./routes/manage";
 import { downloadConnector } from "./routes/download";
 import { status } from "./routes/status";
 import { overview } from "./routes/overview";
-import { claimJob, completeJob, connectorConfig, uploadLogs, uploadUsers } from "./routes/connector";
+import { claimJob, completeJob, connectorConfig, jobProgress, uploadLogs, uploadUsers } from "./routes/connector";
 import { listEmployees, saveEmployee } from "./routes/employees";
 import { downloadReport, exportRange, listReports } from "./routes/reports";
 import { runScheduler } from "./scheduler";
@@ -28,6 +28,10 @@ const R_REPORT_DOWNLOAD = new RegExp(`^/api/reports/${ID}/download$`);
 const R_JOB_USERS = new RegExp(`^/api/connector/jobs/${ID}/users$`);
 const R_EMPLOYEE = /^\/api\/employees\/([^/]{1,100})$/;
 const R_CONNECTOR_PACKAGE = new RegExp(`^/api/connectors/${ID}/package$`);
+const R_DEVICE = new RegExp(`^/api/devices/${ID}$`);
+const R_CONNECTOR = new RegExp(`^/api/connectors/${ID}$`);
+const R_JOB_CANCEL = new RegExp(`^/api/sync-jobs/${ID}/cancel$`);
+const R_JOB_PROGRESS = new RegExp(`^/api/connector/jobs/${ID}/progress$`);
 
 function safeDecode(s: string): string {
   try {
@@ -54,12 +58,15 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (pathname === "/api/connectors" && method === "POST") return createConnector(request, env);
   if (method === "POST" && (m = R_CONNECTOR_REVOKE.exec(pathname))) return revokeConnector(request, env, m[1]);
   if (method === "POST" && (m = R_CONNECTOR_PACKAGE.exec(pathname))) return downloadConnector(request, env, m[1]);
+  if (method === "DELETE" && (m = R_CONNECTOR.exec(pathname))) return deleteConnector(request, env, m[1]);
+  if (method === "DELETE" && (m = R_DEVICE.exec(pathname))) return deleteDevice(request, env, m[1]);
   if (pathname === "/api/devices" && method === "GET") return listDevices(request, env);
   if (pathname === "/api/devices" && method === "POST") return createDevice(request, env);
   if (pathname === "/api/devices/sync-all" && method === "POST") return syncAll(request, env);
   if (method === "POST" && (m = R_DEVICE_DEACTIVATE.exec(pathname))) return deactivateDevice(request, env, m[1]);
   if (method === "POST" && (m = R_DEVICE_SYNC.exec(pathname))) return queueSync(request, env, m[1]);
   if (pathname === "/api/sync-jobs" && method === "GET") return listSyncJobs(request, env);
+  if (method === "POST" && (m = R_JOB_CANCEL.exec(pathname))) return cancelJob(request, env, m[1]);
   if (pathname === "/api/status" && method === "GET") return status(request, env);
   if (pathname === "/api/overview" && method === "GET") return overview(request, env);
   if (pathname === "/api/reports" && method === "GET") return listReports(request, env);
@@ -73,6 +80,7 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (pathname === "/api/connector/jobs/claim" && method === "POST") return claimJob(request, env);
   if (method === "POST" && (m = R_JOB_LOGS.exec(pathname))) return uploadLogs(request, env, m[1]);
   if (method === "POST" && (m = R_JOB_USERS.exec(pathname))) return uploadUsers(request, env, m[1]);
+  if (method === "POST" && (m = R_JOB_PROGRESS.exec(pathname))) return jobProgress(request, env, m[1]);
   if (method === "POST" && (m = R_JOB_COMPLETE.exec(pathname))) return completeJob(request, env, m[1]);
 
   if (pathname.startsWith("/api/")) return json({ error: "Not found" }, 404);
