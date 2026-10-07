@@ -33,7 +33,7 @@ async function resolveDevice(args) {
     return { name: "(command line)", ip: args.ip, port: Number(args.port) || 4370, commKey: Number(args.key) || 0, timeoutMs, source: "command line" };
   }
   if (process.env.CONNECTOR_TOKEN && process.env.CONNECTOR_TOKEN.startsWith("zkc_")) {
-    const config = await clientFromEnv().getConfig();
+    const config = await clientFromEnv("test").getConfig();
     const devices = config.devices;
     if (!devices.length) throw new Error("No devices are assigned to this connector in the dashboard.");
     let d = devices[0];

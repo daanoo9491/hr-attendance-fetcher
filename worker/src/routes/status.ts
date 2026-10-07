@@ -5,7 +5,7 @@ import { requireAuth } from "../lib/auth";
 import { CONNECTOR_VERSION } from "../generated/connector-files";
 import { expireStaleJobs } from "../lib/jobs";
 
-const OFFLINE_MINUTES = 10;
+const OFFLINE_MINUTES = 3;
 const CLOCK_WARN_SECONDS = 120;
 
 type Level = "error" | "warning" | "info";

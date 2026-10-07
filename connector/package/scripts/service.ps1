@@ -6,6 +6,25 @@ $TaskName = "ZKT Connector"
 $Dest     = Join-Path $env:ProgramData "ZKTConnector"
 $LogFile  = Join-Path $Dest "logs\connector.log"
 
+# Locks the folder to Administrators + SYSTEM (it holds the connector token) in a way that
+# keeps every file readable by the connector: set the rule once on the folder, then let
+# everything inside inherit it. (Setting rules on each file with /T can leave files unreadable.)
+function Set-ConnectorPermissions([string]$Path) {
+    & icacls.exe $Path /inheritance:r /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Could not set permissions on $Path (icacls exit code $LASTEXITCODE)." }
+    & icacls.exe (Join-Path $Path "*") /reset /T /C /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Could not reset permissions inside $Path (icacls exit code $LASTEXITCODE)." }
+    $main = Join-Path $Path "src\index.js"
+    if (Test-Path $main) {
+        $ok = $false
+        foreach ($ace in (Get-Acl $main).Access) {
+            try { $sid = $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { continue }
+            if ($sid -eq "S-1-5-18" -and $ace.AccessControlType -eq "Allow" -and ($ace.FileSystemRights.ToString() -match "FullControl|Read")) { $ok = $true }
+        }
+        if (-not $ok) { throw "Windows did not give the connector (SYSTEM) read access to $main." }
+    }
+}
+
 function Show-Log([int]$Lines) {
     if (Test-Path $LogFile) {
         Get-Content $LogFile -Tail $Lines | ForEach-Object { Write-Host "  $_" }
@@ -54,6 +73,7 @@ try {
         "Start" {
             Write-Host "Starting the ZKT Connector..." -ForegroundColor Cyan
             Stop-Connector   # a clean restart if it was already running or stuck
+            Set-ConnectorPermissions $Dest   # repairs folders left unreadable by an older installer
             $from = 0
             if (Test-Path $LogFile) { $from = (Get-Item $LogFile).Length }
             Start-ScheduledTask -TaskName $TaskName
@@ -62,12 +82,15 @@ try {
                 Start-Sleep -Seconds 1
                 $text = Read-NewLog $from
                 if ($text -match "Connected to ") { $ok = $true }
-                elseif ($text -match "ERROR") { $failed = $true }
+                elseif ($text -match "ERROR|EPERM|EACCES|Error:") { $failed = $true }
             }
             ($text -split "`r?`n" | Where-Object { $_ } | Select-Object -Last 8) | ForEach-Object { Write-Host "  $_" }
             Write-Host ""
             if ($ok) {
                 Write-Host "RUNNING. The connector is connected and waiting for syncs." -ForegroundColor Green
+            } elseif ($failed -and $text -match "EPERM|EACCES") {
+                Write-Host "Windows blocked the connector from reading its files." -ForegroundColor Red
+                Write-Host "Run Install.cmd again from a fresh download (Download installer in the dashboard)."
             } elseif ($failed) {
                 Write-Host "The connector started but reported an error (see above)." -ForegroundColor Red
                 Write-Host "It retries by itself. Check the internet connection, or download the installer again if the token is not valid."

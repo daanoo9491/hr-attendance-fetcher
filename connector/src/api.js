@@ -1,14 +1,16 @@
 // HTTP client for the Attendance Fetcher Worker (connector side).
 // Every request has a time limit, so a bad network can never freeze the connector.
-export const CONNECTOR_VERSION = "0.9.0";
+export const CONNECTOR_VERSION = "0.9.1";
 
 const DEFAULT_TIMEOUT_MS = 30000;
 export const CLAIM_WAIT_SECONDS = 20;
 
 export class ApiClient {
-  constructor(baseUrl, token) {
+  /** mode "test": a one-off check (Test-Connection). It does not mark the connector as online. */
+  constructor(baseUrl, token, mode = "service") {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.token = token;
+    this.mode = mode;
   }
 
   async request(method, path, body, timeoutMs = DEFAULT_TIMEOUT_MS) {
@@ -20,6 +22,7 @@ export class ApiClient {
           authorization: `Bearer ${this.token}`,
           "content-type": "application/json",
           "x-connector-version": CONNECTOR_VERSION,
+          "x-connector-mode": this.mode,
         },
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: AbortSignal.timeout(timeoutMs),
@@ -79,12 +82,12 @@ export class ApiClient {
   }
 }
 
-export function clientFromEnv() {
+export function clientFromEnv(mode = "service") {
   const base = process.env.API_BASE_URL;
   const token = process.env.CONNECTOR_TOKEN;
   if (!base) throw new Error("API_BASE_URL is not set in .env");
   if (!token || !token.startsWith("zkc_")) {
     throw new Error("CONNECTOR_TOKEN is not set in .env (create a connector in the dashboard and paste its token)");
   }
-  return new ApiClient(base, token);
+  return new ApiClient(base, token, mode);
 }

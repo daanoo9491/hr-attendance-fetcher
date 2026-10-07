@@ -40,6 +40,8 @@ try {
     if (Test-Path $menu) { Remove-Item $menu -Recurse -Force; Write-Host "Start Menu shortcuts removed." }
 
     if (Test-Path $Dest) {
+        # Make sure every file can be deleted (an older installer could leave files locked).
+        & icacls.exe $Dest /reset /T /C /Q | Out-Null
         # Delete a few seconds later, so this window (which may run from that folder) can finish.
         Start-Process -FilePath "cmd.exe" -ArgumentList "/c ping -n 4 127.0.0.1 >nul & rmdir /s /q `"$Dest`"" -WindowStyle Hidden
         Write-Host "Removing $Dest ..."

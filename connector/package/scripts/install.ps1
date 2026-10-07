@@ -22,6 +22,25 @@ function Find-Node {
     return $null
 }
 
+# Locks the folder to Administrators + SYSTEM (it holds the connector token) in a way that
+# keeps every file readable by the connector: set the rule once on the folder, then let
+# everything inside inherit it. (Setting rules on each file with /T can leave files unreadable.)
+function Set-ConnectorPermissions([string]$Path) {
+    & icacls.exe $Path /inheritance:r /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Could not set permissions on $Path (icacls exit code $LASTEXITCODE)." }
+    & icacls.exe (Join-Path $Path "*") /reset /T /C /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Could not reset permissions inside $Path (icacls exit code $LASTEXITCODE)." }
+    $main = Join-Path $Path "src\index.js"
+    if (Test-Path $main) {
+        $ok = $false
+        foreach ($ace in (Get-Acl $main).Access) {
+            try { $sid = $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { continue }
+            if ($sid -eq "S-1-5-18" -and $ace.AccessControlType -eq "Allow" -and ($ace.FileSystemRights.ToString() -match "FullControl|Read")) { $ok = $true }
+        }
+        if (-not $ok) { throw "Windows did not give the connector (SYSTEM) read access to $main." }
+    }
+}
+
 # Stops connector processes started from any of the given folders (never anything else).
 function Stop-ConnectorProcesses([string[]]$Dirs) {
     $procs = Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='cmd.exe'" -ErrorAction SilentlyContinue
@@ -93,6 +112,8 @@ try {
     # ------------------------------------------------------------ copy files
     Step "Copying files to $Dest"
     New-Item -ItemType Directory -Force -Path $Dest | Out-Null
+    # An earlier version could leave files unreadable: give everything back normal permissions first.
+    & icacls.exe $Dest /reset /T /C /Q | Out-Null
     foreach ($sub in @("src", "scripts")) {
         $p = Join-Path $Dest $sub
         if (Test-Path $p) { Remove-Item $p -Recurse -Force }
@@ -109,7 +130,7 @@ try {
     Get-ChildItem $Dest -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
 
     # The .env file holds the connector token: only administrators and SYSTEM may read this folder.
-    & icacls.exe $Dest /inheritance:r /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" /T /Q | Out-Null
+    Set-ConnectorPermissions $Dest
 
     $logs    = Join-Path $Dest "logs"
     $logFile = Join-Path $logs "connector.log"
@@ -178,7 +199,7 @@ goto loop
             } finally { $fs.Close() }
             $newLines = $text -split "`r?`n" | Where-Object { $_ }
             if ($text -match "Connected to ") { $ok = $true }
-            elseif ($text -match "ERROR") { break }
+            elseif ($text -match "ERROR|EPERM|EACCES|Error:") { break }
         }
     }
     $newLines | Select-Object -Last 8 | ForEach-Object { Write-Host "  $_" }
@@ -187,6 +208,9 @@ goto loop
     if ($ok) {
         Write-Host "INSTALLED. ZKT Connector $version is running and starts automatically with Windows." -ForegroundColor Green
         Write-Host "Check the dashboard: the connector shows a 'Last seen' time and version $version."
+    } elseif ($newLines -match "EPERM|EACCES") {
+        Write-Host "Installed, but Windows blocked the connector from reading its files." -ForegroundColor Red
+        Write-Host "Run Install.cmd again. If it keeps happening, send a screenshot of this window."
     } else {
         Write-Host "Installed, but the connector has not connected to the server yet." -ForegroundColor Yellow
         Write-Host "Check the internet connection and the log: $logFile"

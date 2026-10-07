@@ -4,7 +4,7 @@ export interface Env {
   SIGNUP_CODE?: string;
 }
 
-export const VERSION = "0.11.0-phase11";
+export const VERSION = "0.11.1-phase11";
 
 /** Number of files in worker/migrations. The health check reports "degraded" until all are applied. */
 export const EXPECTED_MIGRATIONS = 6;

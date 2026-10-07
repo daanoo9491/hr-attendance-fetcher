@@ -30,9 +30,12 @@ async function requireConnector(request: Request, env: Env): Promise<ConnectorCo
   ).bind(await sha256Hex(match[1])).first<{ id: string; name: string; company_id: string; timezone: string }>();
   if (!row) throw new HttpError(401, "Connector token is not valid or has been revoked");
 
-  const version = (request.headers.get("x-connector-version") ?? "").trim().slice(0, 40) || null;
-  await env.DB.prepare("UPDATE connectors SET last_seen_at = ?, version = COALESCE(?, version) WHERE id = ?")
-    .bind(new Date().toISOString(), version, row.id).run();
+  // Only the running connector counts as "online"; a one-off Test-Connection does not.
+  if (request.headers.get("x-connector-mode") !== "test") {
+    const version = (request.headers.get("x-connector-version") ?? "").trim().slice(0, 40) || null;
+    await env.DB.prepare("UPDATE connectors SET last_seen_at = ?, version = COALESCE(?, version) WHERE id = ?")
+      .bind(new Date().toISOString(), version, row.id).run();
+  }
 
   return { connectorId: row.id, connectorName: row.name, companyId: row.company_id, companyTimezone: row.timezone };
 }

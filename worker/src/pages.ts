@@ -947,7 +947,7 @@ async function loadConnectors() {
   data.connectors.forEach(function (c) {
     var tr = el("tr");
     tr.appendChild(td(c.name));
-    var online = c.last_seen_at && (Date.now() - new Date(c.last_seen_at).getTime()) < 10 * 60000;
+    var online = c.last_seen_at && (Date.now() - new Date(c.last_seen_at).getTime()) < 2 * 60000;
     tr.appendChild(!c.is_active ? pill("Revoked", "idle") : !c.last_seen_at ? pill("Not installed", "warn") : online ? pill("Online", "ok") : pill("Offline", "bad"));
     tr.appendChild(td(c.version, "muted"));
     tr.appendChild(td(c.last_seen_at ? ago(c.last_seen_at) : "", "muted"));
@@ -1028,11 +1028,11 @@ function syncCell(d, active) {
   if (active) {
     var box = el("div", "prog");
     var waitingFor = st === "pending" ? Math.round((Date.now() - new Date(d.job_requested_at).getTime()) / 1000) : 0;
-    var text = st === "pending"
-      ? (d.connector_seen && Date.now() - new Date(d.connector_seen).getTime() < 120000
-          ? "Starting\u2026 the connector picks this up in a few seconds"
-          : "Waiting for the connector. It looks offline: check that the office PC is on.")
-      : (d.job_msg || "Syncing\u2026");
+    var connectorLive = d.connector_seen && Date.now() - new Date(d.connector_seen).getTime() < 60000;
+    var text = st !== "pending" ? (d.job_msg || "Syncing\u2026")
+      : waitingFor < 20 && connectorLive ? "Starting\u2026 the connector picks this up in a few seconds"
+      : connectorLive ? "The connector has not picked this up yet. On the office PC open Start menu > ZKT Connector > ZKT Connector status."
+      : "Waiting for the connector, but it is not running. On the office PC open Start menu > ZKT Connector > Start ZKT Connector.";
     box.appendChild(el("div", "prog-text", text));
     var bar = el("div", "prog-bar" + (d.job_pct === null || d.job_pct === undefined || st === "pending" || d.job_stage === "retrying" ? " busy" : ""));
     var fill = el("span"); fill.style.width = (d.job_pct || 0) + "%"; bar.appendChild(fill);
