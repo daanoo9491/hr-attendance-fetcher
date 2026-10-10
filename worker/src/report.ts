@@ -1,6 +1,6 @@
 // Builds the attendance Excel workbook for a date range (inclusive, company local dates).
 import type { Env } from "./env";
-import { STYLE, buildXlsx, type CellValue } from "./lib/xlsx";
+import { STYLE, buildXlsx, colName, type CellValue } from "./lib/xlsx";
 import { addDays, excelDate, excelTime } from "./lib/dates";
 
 const STATES: Record<number, string> = { 0: "Check-in", 1: "Check-out", 2: "Break-out", 3: "Break-in", 4: "OT-in", 5: "OT-out" };
@@ -20,7 +20,7 @@ export interface ReportContext {
   companyId: string;
   companyName: string;
   timezone: string;
-  /** Extra lines for the "Report Info" sheet (e.g. sync status of a scheduled report). */
+  /** Sync notes (e.g. machines that did not sync). Kept for callers; not printed in the HR format. */
   notes?: string[];
 }
 
@@ -50,6 +50,25 @@ export async function attendanceStats(env: Env, companyId: string, from: string,
   return { punches: row?.punches ?? 0, employees: row?.employees ?? 0 };
 }
 
+const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+function weekday(date: string): string {
+  return WEEKDAYS[new Date(`${date}T00:00:00Z`).getUTCDay()];
+}
+
+/** Excel time for "HH:MM:SS", cut to whole minutes so Hours Worked matches the times shown. */
+function minuteTime(time: string): number {
+  return excelTime(`${time.slice(0, 5)}:00`);
+}
+
+/**
+ * Workbook layout (matches the HR format):
+ *   Sheet "Attendance": A1:A3 "Employee"; for every date a 3-column block with
+ *   the date (d-mmm) and weekday merged on top, then Time In / Time Out / Hours Worked.
+ *   One row per employee. Hours Worked is a formula (Time Out - Time In), so it
+ *   updates if HR corrects a time by hand.
+ *   Sheet "All Punches": every punch, for checking.
+ */
 export async function buildAttendanceReport(env: Env, ctx: ReportContext, from: string, to: string) {
   const { results } = await env.DB.prepare(
     `SELECT l.device_user_id, l.punch_time, l.punch_state, l.verify_mode,
@@ -62,43 +81,77 @@ export async function buildAttendanceReport(env: Env, ctx: ReportContext, from: 
   ).bind(ctx.companyId, `${from} 00:00:00`, `${addDays(to, 1)} 00:00:00`).all<PunchRow>();
   const punches = results ?? [];
 
-  // ---- Daily summary: one row per person per day
-  type Day = { date: string; userId: string; name: string; dept: string; first: string; last: string; count: number };
+  // Everyone active on the Employees page gets a row (blank when absent), plus anyone who punched.
+  const { results: staff } = await env.DB.prepare(
+    `SELECT device_user_id, NULLIF(full_name, '') AS full_name
+       FROM employees WHERE company_id = ? AND is_active = 1`,
+  ).bind(ctx.companyId).all<{ device_user_id: string; full_name: string | null }>();
+
+  const names = new Map<string, string>();
+  for (const e of staff ?? []) names.set(e.device_user_id, e.full_name ?? "");
+  for (const p of punches) {
+    if (!names.get(p.device_user_id)) names.set(p.device_user_id, p.full_name ?? "");
+  }
+  const userIds = [...names.keys()].sort(byUserId);
+
+  // First and last punch per person per day
+  type Day = { first: string; last: string; count: number };
   const days = new Map<string, Day>();
   for (const p of punches) {
-    const date = p.punch_time.slice(0, 10);
+    const key = `${p.device_user_id}|${p.punch_time.slice(0, 10)}`;
     const time = p.punch_time.slice(11, 19);
-    const key = `${date}|${p.device_user_id}`;
     const d = days.get(key);
-    if (!d) {
-      days.set(key, { date, userId: p.device_user_id, name: p.full_name ?? "", dept: p.department ?? "", first: time, last: time, count: 1 });
-    } else {
+    if (!d) days.set(key, { first: time, last: time, count: 1 });
+    else {
       if (time < d.first) d.first = time;
       if (time > d.last) d.last = time;
       d.count++;
     }
   }
-  const summary = [...days.values()].sort((a, b) => a.date.localeCompare(b.date) || byUserId(a.userId, b.userId));
 
-  const summaryRows: CellValue[][] = [
-    ["Date", "User ID", "Name", "Department", "First In", "Last Out", "Hours", "Punches", "Note"],
-  ];
-  for (const d of summary) {
-    const single = d.count === 1;
-    summaryRows.push([
-      { v: excelDate(d.date), s: STYLE.date },
-      userCell(d.userId),
-      d.name,
-      d.dept,
-      { v: excelTime(d.first), s: STYLE.time },
-      single ? null : { v: excelTime(d.last), s: STYLE.time },
-      single ? null : { v: excelTime(d.last) - excelTime(d.first), s: STYLE.duration },
-      d.count,
-      single ? "Only one punch - check-out missing" : "",
-    ]);
-  }
+  const dates: string[] = [];
+  for (let d = from; d <= to; d = addDays(d, 1)) dates.push(d);
 
-  // ---- All punches
+  const S = STYLE;
+  const row1: CellValue[] = [{ v: "Employee", s: S.gridCorner }];
+  const row2: CellValue[] = [{ s: S.gridCorner }];
+  const row3: CellValue[] = [{ s: S.gridCorner }];
+  const merges = ["A1:A3"];
+  dates.forEach((date, i) => {
+    const c0 = 1 + i * 3;
+    row1.push({ v: excelDate(date), s: S.gridDate }, { s: S.gridDate }, { s: S.gridDate });
+    row2.push({ v: weekday(date), s: S.gridDay }, { s: S.gridDay }, { s: S.gridDay });
+    row3.push({ v: "Time In", s: S.gridHead }, { v: "Time Out", s: S.gridHead }, { v: "Hours Worked", s: S.gridHeadC });
+    merges.push(`${colName(c0)}1:${colName(c0 + 2)}1`, `${colName(c0)}2:${colName(c0 + 2)}2`);
+  });
+
+  const grid: CellValue[][] = [row1, row2, row3];
+  userIds.forEach((id) => {
+    const excelRow = grid.length + 1;
+    const row: CellValue[] = [{ v: names.get(id) || `ID ${id}`, s: S.gridName }];
+    dates.forEach((date, i) => {
+      const inCol = `${colName(1 + i * 3)}${excelRow}`;
+      const outCol = `${colName(2 + i * 3)}${excelRow}`;
+      const d = days.get(`${id}|${date}`);
+      const tin = d ? minuteTime(d.first) : null;
+      const tout = d && d.count > 1 ? minuteTime(d.last) : null;
+      row.push(
+        { v: tin, s: S.gridTime },
+        { v: tout, s: S.gridTime },
+        {
+          f: `IF(OR(${inCol}="",${outCol}=""),"",${outCol}-${inCol})`,
+          v: tin !== null && tout !== null ? Math.round((tout - tin) * 1e8) / 1e8 : "",
+          s: S.gridHours,
+        },
+      );
+    });
+    grid.push(row);
+  });
+
+  const widths = [Math.max(17.33, ...userIds.map((id) => Math.min(40, (names.get(id) || `ID ${id}`).length + 3)))];
+  for (let i = 0; i < dates.length; i++) widths.push(9.5, 9.5, 12.5);
+
+  // ---- All punches (for checking)
   const punchRows: CellValue[][] = [["Date", "Time", "User ID", "Name", "Type", "Verified By", "Device"]];
   for (const p of punches) {
     punchRows.push([
@@ -112,30 +165,12 @@ export async function buildAttendanceReport(env: Env, ctx: ReportContext, from: 
     ]);
   }
 
-  // ---- Info
-  const employees = new Set(punches.map((p) => p.device_user_id)).size;
-  const bold = (s: string) => ({ v: s, s: STYLE.bold });
-  const infoRows: CellValue[][] = [
-    [bold("Attendance Report"), ""],
-    ["", ""],
-    [bold("Company"), ctx.companyName],
-    [bold("Period"), from === to ? from : `${from} to ${to}`],
-    [bold("Generated"), `${new Date().toISOString().replace("T", " ").slice(0, 16)} UTC`],
-    [bold("Time zone"), `${ctx.timezone} (times are as recorded by the machine)`],
-    [bold("Employees with punches"), employees],
-    [bold("Total punches"), punches.length],
-    ["", ""],
-    [bold("Notes"), "A day runs 00:00-23:59. Hours = Last Out - First In (breaks are not deducted)."],
-    ["", "Names come from the machine's user list or the Employees page of the dashboard."],
-    ...(ctx.notes ?? []).map((n) => ["", n] as CellValue[]),
-  ];
-
   const bytes = buildXlsx([
-    { name: "Daily Summary", widths: [13, 10, 24, 18, 10, 10, 8, 9, 34], rows: summaryRows, header: true },
+    { name: "Attendance", widths, rows: grid, merges, freeze: { cols: 1, rows: 3 } },
     { name: "All Punches", widths: [13, 10, 10, 24, 12, 13, 18], rows: punchRows, header: true },
-    { name: "Report Info", widths: [24, 70], rows: infoRows },
   ]);
 
+  const employees = new Set(punches.map((p) => p.device_user_id)).size;
   return { bytes, stats: { punches: punches.length, employees } };
 }
 
