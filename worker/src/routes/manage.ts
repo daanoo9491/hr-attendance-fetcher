@@ -5,6 +5,7 @@ import { HttpError, json, readJson } from "../lib/http";
 import { requireAuth, requireRole } from "../lib/auth";
 import { randomToken, sha256Hex } from "../lib/crypto";
 import { expireStaleJobs } from "../lib/jobs";
+import { checkGroup } from "./groups";
 
 const IPV4 = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
 
@@ -80,6 +81,7 @@ export async function listDevices(request: Request, env: Env): Promise<Response>
   await expireStaleJobs(env, { companyId: auth.companyId });
   const { results } = await env.DB.prepare(
     `SELECT d.id, d.name, d.model, d.ip_address, d.port, d.comm_key, d.serial_number,
+            d.group_id, g.name AS group_name,
             d.connector_id, c.name AS connector_name, c.is_active AS connector_active, c.last_seen_at AS connector_seen,
             d.last_sync_at, d.clock_offset_seconds, d.clock_checked_at, d.is_active, d.created_at,
             (SELECT COUNT(*) FROM attendance_logs l WHERE l.device_id = d.id) AS log_count,
@@ -88,6 +90,7 @@ export async function listDevices(request: Request, env: Env): Promise<Response>
             j.error_message AS job_error, j.finished_at AS job_finished_at, j.records_inserted AS job_new
        FROM devices d
        LEFT JOIN connectors c ON c.id = d.connector_id
+       LEFT JOIN machine_groups g ON g.id = d.group_id
        LEFT JOIN sync_jobs j ON j.id = (SELECT id FROM sync_jobs WHERE device_id = d.id ORDER BY requested_at DESC LIMIT 1)
       WHERE d.company_id = ?
       ORDER BY d.is_active DESC, d.created_at DESC`,
@@ -95,7 +98,7 @@ export async function listDevices(request: Request, env: Env): Promise<Response>
   return json({ devices: results ?? [], server_time: new Date().toISOString() });
 }
 
-/** POST /api/devices  { name, ip_address, port?, comm_key?, model?, connector_id? } */
+/** POST /api/devices  { name, ip_address, port?, comm_key?, model?, connector_id?, group_id? } */
 export async function createDevice(request: Request, env: Env): Promise<Response> {
   const auth = await requireAuth(request, env);
   requireRole(auth, ["owner", "admin"]);
@@ -116,11 +119,13 @@ export async function createDevice(request: Request, env: Env): Promise<Response
     connectorId = body.connector_id;
   }
 
+  const groupId = await checkGroup(env, auth.companyId, body.group_id);
+
   const id = crypto.randomUUID();
   await env.DB.prepare(
-    `INSERT INTO devices (id, company_id, connector_id, name, model, ip_address, port, comm_key)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).bind(id, auth.companyId, connectorId, name, model, ip, port, commKey).run();
+    `INSERT INTO devices (id, company_id, connector_id, name, model, ip_address, port, comm_key, group_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(id, auth.companyId, connectorId, name, model, ip, port, commKey, groupId).run();
 
   return json({ device: { id, name } }, 201);
 }
@@ -243,6 +248,8 @@ export async function deleteDevice(request: Request, env: Env, id: string): Prom
       statements.push(
         env.DB.prepare("UPDATE OR IGNORE attendance_logs SET device_id = ?, sync_job_id = NULL WHERE device_id = ?")
           .bind(body.move_to, id),
+        // Its employees (names, departments) move too, unless the target already has that user ID.
+        env.DB.prepare("UPDATE OR IGNORE employees SET device_id = ? WHERE device_id = ?").bind(body.move_to, id),
       );
       moved = count;
     } else if (body.delete_punches !== true) {
@@ -251,6 +258,7 @@ export async function deleteDevice(request: Request, env: Env, id: string): Prom
   }
   statements.push(
     env.DB.prepare("DELETE FROM attendance_logs WHERE device_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM employees WHERE device_id = ?").bind(id),
     env.DB.prepare("DELETE FROM sync_jobs WHERE device_id = ?").bind(id),
     env.DB.prepare("DELETE FROM devices WHERE id = ? AND company_id = ?").bind(id, auth.companyId),
   );

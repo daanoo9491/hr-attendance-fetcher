@@ -188,7 +188,7 @@ td.empty { color:var(--muted); padding:28px 14px; text-align:center; white-space
 .form-row { display:grid; gap:12px; align-items:end; }
 .form-row.cols-2 { grid-template-columns:minmax(0, 1fr) auto; }
 .form-row.cols-dev { grid-template-columns:1.3fr 1.1fr 90px 100px 1.2fr auto; }
-.form-row.cols-exp { grid-template-columns:180px 180px auto; justify-content:start; }
+.form-row.cols-exp { grid-template-columns:180px 180px minmax(180px, 260px) auto; justify-content:start; }
 .setup {
   margin-top:16px; padding:16px 18px; border-radius:var(--radius); background:var(--accent-soft);
   border:1px solid color-mix(in srgb, var(--accent) 30%, transparent);
@@ -478,7 +478,7 @@ export function appPage(auth: AuthContext): string {
       </div>
       <div class="stack">
         <div class="panel">
-          <div class="panel-head"><div><h2>Scheduled reports</h2><p>Each file has a daily summary (first in, last out, hours) and every punch. It's built when you download it, so late punches are included.</p></div></div>
+          <div class="panel-head"><div><h2>Scheduled reports</h2><p>Each file has one sheet per machine group, and one per machine that is not in a group (Time In, Time Out, Hours Worked), plus every punch. It's built when you download it, so late punches are included.</p></div></div>
           <div class="table-wrap"><table>
             <thead><tr><th>Period</th><th>Status</th><th class="num">Machines synced</th><th class="num">Employees</th><th class="num">Punches</th><th>Ready</th><th>Note</th><th></th></tr></thead>
             <tbody id="r_rows"></tbody>
@@ -490,6 +490,7 @@ export function appPage(auth: AuthContext): string {
             <div class="form-row cols-exp">
               <div class="field"><label for="x_from">From</label><input class="input" id="x_from" type="date"></div>
               <div class="field"><label for="x_to">To</label><input class="input" id="x_to" type="date"></div>
+              <div class="field"><label for="x_scope">Machines</label><select class="input" id="x_scope"><option value="">All (one sheet each)</option></select></div>
               <button class="btn btn-primary" id="x_go" type="button">Download Excel</button>
             </div>
             <div class="error-text" id="x_msg" style="margin-top:8px"></div>
@@ -507,7 +508,7 @@ export function appPage(auth: AuthContext): string {
       <div class="panel">
         <div class="table-wrap" style="margin-top:0;border-top:0;border-radius:12px">
           <table>
-            <thead><tr><th class="num">User ID</th><th>Name</th><th>Department</th><th>Name from</th><th>Last punch</th><th></th></tr></thead>
+            <thead><tr><th class="num">User ID</th><th>Name</th><th>Department</th><th>Machine or group</th><th>Name from</th><th>Last punch</th><th></th></tr></thead>
             <tbody id="e_rows"></tbody>
           </table>
         </div>
@@ -552,8 +553,23 @@ export function appPage(auth: AuthContext): string {
             <div class="error-text" id="d_msg" style="margin-top:8px"></div>
           </div>
           <div class="table-wrap"><table>
-            <thead><tr><th>Machine</th><th>Last sync</th><th>Clock</th><th class="num">Punches</th><th>Connector</th><th></th></tr></thead>
+            <thead><tr><th>Machine</th><th>Last sync</th><th>Clock</th><th class="num">Punches</th><th>Connector</th><th>Group</th><th></th></tr></thead>
             <tbody id="d_rows"></tbody>
+          </table></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><div><h2>Machine groups</h2><p>Group machines that the same people use with the same user IDs, for example two machines in one office. A group is one sheet in the Excel report. A machine without a group has its own sheet, and ID 2 on it is a different person from ID 2 on any other machine.</p></div></div>
+          <div class="panel-body"${manageOnly}>
+            <div class="form-row cols-2">
+              <div class="field"><label for="g_name">New group name</label><input class="input" id="g_name" placeholder="e.g. PIA Office" maxlength="40"></div>
+              <button class="btn btn-primary" id="g_add" type="button">Create group</button>
+            </div>
+            <div class="error-text" id="g_msg" style="margin-top:8px"></div>
+          </div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Group</th><th>Machines</th><th></th></tr></thead>
+            <tbody id="g_rows"></tbody>
           </table></div>
         </div>
       </div>
@@ -756,7 +772,7 @@ function renderTimeline(data, isToday) {
     var row = el("div", "tl-row");
     var who = el("div", "tl-who");
     who.appendChild(el("div", "n", p.name || ("User " + p.user_id)));
-    who.appendChild(el("div", "i", "ID " + p.user_id + (p.department ? " \u00b7 " + p.department : "")));
+    who.appendChild(el("div", "i", "ID " + p.user_id + (p.where ? " \u00b7 " + p.where : "") + (p.department ? " \u00b7 " + p.department : "")));
     row.appendChild(who);
 
     var track = el("div", "tl-track");
@@ -790,7 +806,7 @@ function renderTimeline(data, isToday) {
 
   if (!absentBox.hidden) {
     absentBox.appendChild(el("span", "k", "No punch (" + data.absent.length + "):"));
-    data.absent.forEach(function (x) { absentBox.appendChild(el("span", "chip", x.name || ("ID " + x.user_id))); });
+    data.absent.forEach(function (x) { absentBox.appendChild(el("span", "chip", (x.name || ("ID " + x.user_id)) + (x.where ? " \u00b7 " + x.where : ""))); });
   }
 }
 
@@ -834,7 +850,9 @@ document.getElementById("x_go").addEventListener("click", function () {
   if (!from || !to) { setText("x_msg", "Choose both dates."); return; }
   if (to < from) { setText("x_msg", "The end date must be on or after the start date."); return; }
   setText("x_msg", "");
-  location.href = "/api/export.xlsx?from=" + encodeURIComponent(from) + "&to=" + encodeURIComponent(to);
+  var scope = document.getElementById("x_scope").value;
+  location.href = "/api/export.xlsx?from=" + encodeURIComponent(from) + "&to=" + encodeURIComponent(to) +
+    (scope ? "&scope=" + encodeURIComponent(scope) : "");
 });
 
 /* ---------- employees */
@@ -857,16 +875,23 @@ async function loadEmployees() {
   renderEmployees();
 }
 var empEditingId = null;
+function empKey(e) { return e.scope_id + "|" + e.user_id; }
+function scopeCell(e) {
+  var c = el("td", "muted");
+  c.appendChild(document.createTextNode(e.scope_name));
+  if (e.scope_kind === "group") c.appendChild(el("span", "sub-id", "Group"));
+  return c;
+}
 function renderEmployees() {
   var q = document.getElementById("e_search").value.trim().toLowerCase();
   var tbody = document.getElementById("e_rows");
   tbody.textContent = "";
   var list = empData.filter(function (e) {
-    return !q || (e.user_id + " " + e.name + " " + (e.machine_name || "") + " " + e.department).toLowerCase().indexOf(q) >= 0;
+    return !q || (e.user_id + " " + e.name + " " + (e.machine_name || "") + " " + e.department + " " + e.scope_name).toLowerCase().indexOf(q) >= 0;
   });
-  if (!empData.length) { emptyRow(tbody, 6, "No employees yet. They appear after the first sync."); return; }
-  if (!list.length) { emptyRow(tbody, 6, "No employee matches \u201c" + q + "\u201d."); return; }
-  list.forEach(function (e) { tbody.appendChild(e.user_id === empEditingId ? editRow(e) : viewRow(e)); });
+  if (!empData.length) { emptyRow(tbody, 7, "No employees yet. They appear after the first sync."); return; }
+  if (!list.length) { emptyRow(tbody, 7, "No employee matches \u201c" + q + "\u201d."); return; }
+  list.forEach(function (e) { tbody.appendChild(empKey(e) === empEditingId ? editRow(e) : viewRow(e)); });
 }
 function viewRow(e) {
   var tr = el("tr");
@@ -875,11 +900,12 @@ function viewRow(e) {
   if (e.name) name.appendChild(el("span", null, e.name)); else name.appendChild(el("span", "pill warn", "Needs a name"));
   tr.appendChild(name);
   tr.appendChild(td(e.department, e.department ? "" : "muted"));
+  tr.appendChild(scopeCell(e));
   tr.appendChild(td(e.name_edited ? "Edited here" : (e.machine_name ? "Machine" : ""), "muted"));
   tr.appendChild(td(punchTime(e.last_punch), "muted"));
   var actions = el("td", "actions");
   if (CAN_MANAGE) actions.appendChild(btn("Edit", "btn-ghost", function () {
-    empEditingId = e.user_id; empEditing = true; renderEmployees();
+    empEditingId = empKey(e); empEditing = true; renderEmployees();
     var f = document.querySelector("#e_rows input"); if (f) f.focus();
   }));
   tr.appendChild(actions);
@@ -894,6 +920,7 @@ function editRow(e) {
   if (e.machine_name) c1.appendChild(el("span", "sub-id", "On the machine: " + e.machine_name));
   tr.appendChild(c1);
   var c2 = el("td"); c2.appendChild(deptIn); tr.appendChild(c2);
+  tr.appendChild(scopeCell(e));
   tr.appendChild(td(e.name_edited ? "Edited here" : (e.machine_name ? "Machine" : ""), "muted"));
   tr.appendChild(td(punchTime(e.last_punch), "muted"));
   function done() { empEditingId = null; empEditing = false; }
@@ -903,7 +930,7 @@ function editRow(e) {
     // Same as the machine's name (or empty): keep following the machine.
     if (e.machine_name && name === e.machine_name) name = "";
     try {
-      await api("PUT", "/api/employees/" + encodeURIComponent(e.user_id), { name: name, department: deptIn.value });
+      await api("PUT", "/api/employees/" + e.scope_id + "/" + encodeURIComponent(e.user_id), { name: name, department: deptIn.value });
       setText("e_msg", "");
       done();
       toast("Saved " + (name || e.machine_name || "user " + e.user_id));
@@ -1051,14 +1078,19 @@ function syncCell(d, active) {
   return c;
 }
 
+var groupsData = [];
 async function loadDevices() {
   var anyActive = false;
-  var data = await api("GET", "/api/devices");
+  var both = await Promise.all([api("GET", "/api/devices"), api("GET", "/api/groups")]);
+  var data = both[0];
+  groupsData = both[1].groups;
+  renderGroups();
+  renderExportScopes(data.devices);
   var tbody = document.getElementById("d_rows");
   tbody.textContent = "";
   devicesData = data.devices;
   document.getElementById("count_machines").textContent = data.devices.filter(function (d) { return d.is_active; }).length || "";
-  if (!data.devices.length) emptyRow(tbody, 6, "No machines yet. Add your attendance machine above.");
+  if (!data.devices.length) emptyRow(tbody, 7, "No machines yet. Add your attendance machine above.");
   data.devices.forEach(function (d) {
     var tr = el("tr");
     var name = el("td"); name.appendChild(document.createTextNode(d.name));
@@ -1073,6 +1105,7 @@ async function loadDevices() {
     tr.appendChild(ck ? pill(ck.t, ck.k) : td(""));
     tr.appendChild(td(d.log_count, "num"));
     tr.appendChild(td(d.connector_name, "muted"));
+    tr.appendChild(groupCell(d));
     var actions = el("td", "actions");
     if (CAN_MANAGE && active) {
       actions.appendChild(btn("Stop", "btn-danger", async function () {
@@ -1107,6 +1140,82 @@ async function loadDevices() {
   }
 }
 var wasActive = false;
+
+/* ---------- machines: groups */
+function groupCell(d) {
+  if (!CAN_MANAGE || (!groupsData.length && !d.group_id)) return td(d.group_name, "muted");
+  var c = el("td");
+  var sel = el("select", "input input-sm");
+  sel.setAttribute("aria-label", "Group for " + d.name);
+  var none = el("option", null, "No group"); none.value = ""; sel.appendChild(none);
+  groupsData.forEach(function (g) { var o = el("option", null, g.name); o.value = g.id; sel.appendChild(o); });
+  sel.value = d.group_id || "";
+  sel.addEventListener("change", async function () {
+    sel.disabled = true;
+    try {
+      await api("PUT", "/api/devices/" + d.id + "/group", { group_id: sel.value || null });
+      var g = groupsData.find(function (x) { return x.id === sel.value; });
+      toast(g ? d.name + " is now in " + g.name : d.name + " is no longer in a group");
+      await refreshAfterGrouping();
+    } catch (err) { setText("d_msg", err.message); sel.value = d.group_id || ""; sel.disabled = false; }
+  });
+  c.appendChild(sel);
+  return c;
+}
+function refreshAfterGrouping() {
+  return Promise.all([quiet(loadDevices()), quiet(loadEmployees()), quiet(loadOverview())]);
+}
+function renderGroups() {
+  var tbody = document.getElementById("g_rows");
+  tbody.textContent = "";
+  if (!groupsData.length) { emptyRow(tbody, 3, "No groups. Every machine is reported on its own sheet."); return; }
+  groupsData.forEach(function (g) {
+    var tr = el("tr");
+    tr.appendChild(td(g.name));
+    tr.appendChild(td(g.machines ? g.machine_names : "No machines yet. Choose this group in the Group column above.", g.machines ? "" : "muted"));
+    var actions = el("td", "actions");
+    if (CAN_MANAGE) {
+      actions.appendChild(btn("Rename", "btn-ghost", async function () {
+        var name = prompt("New name for the group " + g.name, g.name);
+        if (name === null || name.trim() === g.name) return;
+        try { await api("PUT", "/api/groups/" + g.id, { name: name }); toast("Renamed to " + name.trim()); await refreshAfterGrouping(); }
+        catch (err) { setText("g_msg", err.message); }
+      }));
+      actions.appendChild(btn("Delete", "btn-danger", function () {
+        confirmDialog("Delete the group " + g.name + "?",
+          [g.machines ? "Its machines (" + g.machine_names + ") stay, without a group. Each one gets its own sheet in the Excel report again." : "It has no machines.",
+           "No attendance or employee names are deleted."],
+          "Delete group",
+          async function () { await api("DELETE", "/api/groups/" + g.id); toast("Deleted the group " + g.name); await refreshAfterGrouping(); });
+      }));
+    }
+    tr.appendChild(actions);
+    tbody.appendChild(tr);
+  });
+}
+function renderExportScopes(devices) {
+  var sel = document.getElementById("x_scope");
+  var keep = sel.value;
+  while (sel.options.length > 1) sel.remove(1);
+  groupsData.filter(function (g) { return g.machines > 0; }).forEach(function (g) {
+    var o = el("option", null, g.name + " (group)"); o.value = g.id; sel.appendChild(o);
+  });
+  devices.filter(function (d) { return !d.group_id; }).forEach(function (d) {
+    var o = el("option", null, d.name + (d.is_active ? "" : " (deactivated)")); o.value = d.id; sel.appendChild(o);
+  });
+  sel.value = keep;
+  if (sel.value !== keep) sel.value = "";
+}
+document.getElementById("g_add").addEventListener("click", async function () {
+  var input = document.getElementById("g_name");
+  try {
+    var r = await api("POST", "/api/groups", { name: input.value });
+    input.value = ""; setText("g_msg", "");
+    toast("Created " + r.group.name + ". Now choose it in the Group column of each machine.");
+    await loadDevices();
+  } catch (err) { setText("g_msg", err.message); }
+});
+document.getElementById("g_name").addEventListener("keydown", function (ev) { if (ev.key === "Enter") document.getElementById("g_add").click(); });
 
 function deleteMachine(d) {
   var punches = Number(d.log_count) || 0;

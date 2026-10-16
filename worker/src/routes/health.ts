@@ -3,7 +3,7 @@ import { json } from "../lib/http";
 
 const REQUIRED_TABLES = [
   "companies", "users", "sessions", "connectors",
-  "devices", "employees", "sync_jobs", "attendance_logs",
+  "devices", "employees", "sync_jobs", "attendance_logs", "machine_groups",
 ];
 
 async function appliedMigrations(env: Env): Promise<number> {

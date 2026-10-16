@@ -250,8 +250,9 @@ const USER_ID_RE = /^[A-Za-z0-9_.-]{1,32}$/;
 
 /**
  * Receives the machine's user list ({ users: [{ user_id, name }] }).
- * New user IDs become employees; the machine name is stored and shown in
- * reports unless someone has edited that employee's name in the dashboard.
+ * New user IDs become employees OF THIS MACHINE (ID 2 on another machine is someone
+ * else); the machine name is stored and shown in reports unless someone has edited
+ * that employee's name in the dashboard.
  */
 export async function uploadUsers(request: Request, env: Env, jobId: string): Promise<Response> {
   const ctx = await requireConnector(request, env);
@@ -276,16 +277,16 @@ export async function uploadUsers(request: Request, env: Env, jobId: string): Pr
   const rows = [...clean].map(([u, n]) => ({ u, n }));
   if (!rows.length) return json({ received: body.users.length, accepted: 0, named: 0, added: 0 });
 
-  const before = await env.DB.prepare("SELECT COUNT(*) AS n FROM employees WHERE company_id = ?")
-    .bind(job.company_id).first<{ n: number }>();
+  const before = await env.DB.prepare("SELECT COUNT(*) AS n FROM employees WHERE device_id = ?")
+    .bind(job.device_id).first<{ n: number }>();
 
   // A blank name on the machine never wipes a name we already have.
   await env.DB.prepare(
-    `INSERT INTO employees (id, company_id, device_user_id, full_name, machine_name, updated_at)
-     SELECT lower(hex(randomblob(16))), ?1, json_extract(value, '$.u'),
+    `INSERT INTO employees (id, company_id, device_id, device_user_id, full_name, machine_name, updated_at)
+     SELECT lower(hex(randomblob(16))), ?1, ?4, json_extract(value, '$.u'),
             json_extract(value, '$.n'), NULLIF(json_extract(value, '$.n'), ''), ?2
        FROM json_each(?3) WHERE true
-     ON CONFLICT (company_id, device_user_id) DO UPDATE SET
+     ON CONFLICT (company_id, device_id, device_user_id) DO UPDATE SET
        machine_name = COALESCE(excluded.machine_name, employees.machine_name),
        full_name    = CASE
                         WHEN employees.name_edited = 1 THEN employees.full_name
@@ -296,10 +297,10 @@ export async function uploadUsers(request: Request, env: Env, jobId: string): Pr
                         WHEN COALESCE(excluded.machine_name, '') <> COALESCE(employees.machine_name, '') THEN excluded.updated_at
                         ELSE employees.updated_at
                       END`,
-  ).bind(job.company_id, new Date().toISOString(), JSON.stringify(rows)).run();
+  ).bind(job.company_id, new Date().toISOString(), JSON.stringify(rows), job.device_id).run();
 
-  const after = await env.DB.prepare("SELECT COUNT(*) AS n FROM employees WHERE company_id = ?")
-    .bind(job.company_id).first<{ n: number }>();
+  const after = await env.DB.prepare("SELECT COUNT(*) AS n FROM employees WHERE device_id = ?")
+    .bind(job.device_id).first<{ n: number }>();
 
   return json({
     received: body.users.length,

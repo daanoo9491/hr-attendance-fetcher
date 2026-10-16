@@ -4,6 +4,7 @@ import { HttpError, json } from "../lib/http";
 import { requireAuth, type AuthContext } from "../lib/auth";
 import { daysBetween, isDate, localNow, nextPeriod } from "../lib/dates";
 import { buildAttendanceReport, reportFilename, xlsxResponse } from "../report";
+import { loadScopes } from "../lib/scopes";
 
 const MAX_EXPORT_DAYS = 62;
 
@@ -57,7 +58,7 @@ export async function downloadReport(request: Request, env: Env, id: string): Pr
   return xlsxResponse(bytes, reportFilename(auth.companyName, report.period_start, report.period_end));
 }
 
-/** GET /api/export.xlsx?from=YYYY-MM-DD&to=YYYY-MM-DD */
+/** GET /api/export.xlsx?from=YYYY-MM-DD&to=YYYY-MM-DD[&scope=<group or machine id>] */
 export async function exportRange(request: Request, env: Env): Promise<Response> {
   const auth = await requireAuth(request, env);
   const params = new URL(request.url).searchParams;
@@ -67,11 +68,22 @@ export async function exportRange(request: Request, env: Env): Promise<Response>
   if (to < from) throw new HttpError(400, "'to' must be on or after 'from'");
   if (daysBetween(from, to) + 1 > MAX_EXPORT_DAYS) throw new HttpError(400, `Export at most ${MAX_EXPORT_DAYS} days at a time`);
 
+  let scopeId: string | undefined;
+  let scopeName: string | undefined;
+  const scope = params.get("scope");
+  if (scope) {
+    const { byId } = await loadScopes(env, auth.companyId);
+    const found = byId.get(scope);
+    if (!found) throw new HttpError(404, "Machine or group not found");
+    scopeId = found.id;
+    scopeName = found.name;
+  }
+
   const { bytes } = await buildAttendanceReport(
     env,
-    { companyId: auth.companyId, companyName: auth.companyName, timezone: auth.companyTimezone, notes: ["Manual export."] },
+    { companyId: auth.companyId, companyName: auth.companyName, timezone: auth.companyTimezone, notes: ["Manual export."], scopeId },
     from,
     to,
   );
-  return xlsxResponse(bytes, reportFilename(auth.companyName, from, to));
+  return xlsxResponse(bytes, reportFilename(scopeName ? `${auth.companyName} ${scopeName}` : auth.companyName, from, to));
 }

@@ -12,6 +12,7 @@ import { status } from "./routes/status";
 import { overview } from "./routes/overview";
 import { claimJob, completeJob, connectorConfig, jobProgress, uploadLogs, uploadUsers } from "./routes/connector";
 import { listEmployees, saveEmployee } from "./routes/employees";
+import { createGroup, deleteGroup, listGroups, renameGroup, setDeviceGroup } from "./routes/groups";
 import { downloadReport, exportRange, listReports } from "./routes/reports";
 import { runScheduler } from "./scheduler";
 import { appPage, loginPage, signupPage } from "./pages";
@@ -26,7 +27,9 @@ const R_JOB_LOGS = new RegExp(`^/api/connector/jobs/${ID}/logs$`);
 const R_JOB_COMPLETE = new RegExp(`^/api/connector/jobs/${ID}/complete$`);
 const R_REPORT_DOWNLOAD = new RegExp(`^/api/reports/${ID}/download$`);
 const R_JOB_USERS = new RegExp(`^/api/connector/jobs/${ID}/users$`);
-const R_EMPLOYEE = /^\/api\/employees\/([^/]{1,100})$/;
+const R_EMPLOYEE = new RegExp(`^/api/employees/${ID}/([^/]{1,100})$`);
+const R_GROUP = new RegExp(`^/api/groups/${ID}$`);
+const R_DEVICE_GROUP = new RegExp(`^/api/devices/${ID}/group$`);
 const R_CONNECTOR_PACKAGE = new RegExp(`^/api/connectors/${ID}/package$`);
 const R_DEVICE = new RegExp(`^/api/devices/${ID}$`);
 const R_CONNECTOR = new RegExp(`^/api/connectors/${ID}$`);
@@ -73,7 +76,12 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (method === "GET" && (m = R_REPORT_DOWNLOAD.exec(pathname))) return downloadReport(request, env, m[1]);
   if (pathname === "/api/export.xlsx" && method === "GET") return exportRange(request, env);
   if (pathname === "/api/employees" && method === "GET") return listEmployees(request, env);
-  if (method === "PUT" && (m = R_EMPLOYEE.exec(pathname))) return saveEmployee(request, env, safeDecode(m[1]));
+  if (method === "PUT" && (m = R_EMPLOYEE.exec(pathname))) return saveEmployee(request, env, m[1], safeDecode(m[2]));
+  if (pathname === "/api/groups" && method === "GET") return listGroups(request, env);
+  if (pathname === "/api/groups" && method === "POST") return createGroup(request, env);
+  if (method === "PUT" && (m = R_GROUP.exec(pathname))) return renameGroup(request, env, m[1]);
+  if (method === "DELETE" && (m = R_GROUP.exec(pathname))) return deleteGroup(request, env, m[1]);
+  if (method === "PUT" && (m = R_DEVICE_GROUP.exec(pathname))) return setDeviceGroup(request, env, m[1]);
 
   // ---- ZKT Connector API (Bearer token)
   if (pathname === "/api/connector/config" && method === "GET") return connectorConfig(request, env);

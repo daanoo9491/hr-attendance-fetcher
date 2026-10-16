@@ -4,6 +4,7 @@ import { HttpError, json } from "../lib/http";
 import { requireAuth } from "../lib/auth";
 import { addDays, isDate, localNow } from "../lib/dates";
 import { schedule } from "./reports";
+import { loadPeople, loadScopes, personKey } from "../lib/scopes";
 
 export async function overview(request: Request, env: Env): Promise<Response> {
   const auth = await requireAuth(request, env);
@@ -13,40 +14,55 @@ export async function overview(request: Request, env: Env): Promise<Response> {
   const date = q ?? today;
 
   const { results: punches } = await env.DB.prepare(
-    `SELECT l.device_user_id AS user_id, substr(l.punch_time, 12, 5) AS time
+    `SELECT l.device_id, l.device_user_id AS user_id, substr(l.punch_time, 12, 5) AS time
        FROM attendance_logs l
       WHERE l.company_id = ? AND l.punch_time >= ? AND l.punch_time < ?
       ORDER BY l.punch_time`,
-  ).bind(auth.companyId, `${date} 00:00:00`, `${addDays(date, 1)} 00:00:00`).all<{ user_id: string; time: string }>();
+  ).bind(auth.companyId, `${date} 00:00:00`, `${addDays(date, 1)} 00:00:00`)
+    .all<{ device_id: string; user_id: string; time: string }>();
 
-  // Everyone the company knows: employees table + anyone who ever punched.
-  const { results: people } = await env.DB.prepare(
-    `WITH ids AS (
-       SELECT device_user_id FROM employees WHERE company_id = ?1 AND is_active = 1
-       UNION SELECT DISTINCT device_user_id FROM attendance_logs WHERE company_id = ?1
-     )
-     SELECT ids.device_user_id AS user_id, NULLIF(e.full_name, '') AS name, e.department
-       FROM ids LEFT JOIN employees e ON e.company_id = ?1 AND e.device_user_id = ids.device_user_id`,
-  ).bind(auth.companyId).all<{ user_id: string; name: string | null; department: string | null }>();
+  // A person = user ID within a machine (or within the machine's group).
+  const { scopes, byId, scopeOfDevice } = await loadScopes(env, auth.companyId);
+  const people = await loadPeople(env, auth.companyId, scopeOfDevice);
+  const { results: everPunched } = await env.DB.prepare(
+    "SELECT DISTINCT device_id, device_user_id FROM attendance_logs WHERE company_id = ?",
+  ).bind(auth.companyId).all<{ device_id: string; device_user_id: string }>();
+  for (const r of everPunched ?? []) {
+    const scope = scopeOfDevice.get(r.device_id);
+    if (!scope) continue;
+    const key = personKey(scope.id, r.device_user_id);
+    if (!people.has(key)) {
+      people.set(key, { scopeId: scope.id, userId: r.device_user_id, name: "", machineName: null, department: "", edited: false, active: true });
+    }
+  }
+  const showWhere = scopes.length > 1;
+  const where = (scopeId: string) => (showWhere ? byId.get(scopeId)?.name ?? null : null);
 
   const sync = await env.DB.prepare(
     "SELECT MAX(last_sync_at) AS last_sync, COUNT(*) AS machines FROM devices WHERE company_id = ? AND is_active = 1",
   ).bind(auth.companyId).first<{ last_sync: string | null; machines: number }>();
 
-  const byUser = new Map<string, string[]>();
+  const byPerson = new Map<string, { scopeId: string; userId: string; times: string[] }>();
   for (const p of punches ?? []) {
-    const list = byUser.get(p.user_id) ?? [];
-    list.push(p.time);
-    byUser.set(p.user_id, list);
+    const scope = scopeOfDevice.get(p.device_id);
+    if (!scope) continue;
+    const key = personKey(scope.id, p.user_id);
+    const entry = byPerson.get(key) ?? { scopeId: scope.id, userId: p.user_id, times: [] };
+    entry.times.push(p.time);
+    byPerson.set(key, entry);
   }
-  const info = new Map((people ?? []).map((p) => [p.user_id, p]));
-  const present = [...byUser].map(([user_id, times]) => ({
-    user_id, name: info.get(user_id)?.name ?? null, department: info.get(user_id)?.department ?? null, punches: times,
-  }));
+  const present = [...byPerson].map(([key, e]) => {
+    const info = people.get(key);
+    e.times.sort();
+    return {
+      user_id: e.userId, name: info?.name || null, department: info?.department || null,
+      where: where(e.scopeId), punches: e.times,
+    };
+  });
   present.sort((a, b) => a.punches[0].localeCompare(b.punches[0]) || a.user_id.localeCompare(b.user_id));
-  const absent = (people ?? [])
-    .filter((p) => !byUser.has(p.user_id))
-    .map((p) => ({ user_id: p.user_id, name: p.name }))
+  const absent = [...people]
+    .filter(([key, p]) => p.active && !byPerson.has(key) && byId.get(p.scopeId)?.active)
+    .map(([, p]) => ({ user_id: p.userId, name: p.name || null, where: where(p.scopeId) }))
     .sort((a, b) => (a.name ?? "~").localeCompare(b.name ?? "~") || a.user_id.localeCompare(b.user_id));
 
   return json({
