@@ -161,7 +161,17 @@ td.empty { color:var(--muted); padding:28px 14px; text-align:center; white-space
 .summary .d { font-size:12.5px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 
 /* ---------- overview: day timeline (the signature element) */
-.day-nav { display:flex; align-items:center; gap:6px; }
+.day-nav { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.att-filters { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.att-filters .input-sm { width:auto; min-width:170px; }
+td .input-time { min-width:0; width:112px; }
+td .input-note { min-width:0; width:150px; }
+.stack-btns { display:flex; flex-direction:column; align-items:flex-end; gap:6px; }
+.punch-list { font-variant-numeric:tabular-nums; color:var(--ink-2); white-space:normal; max-width:150px; }
+.att-status .sub-id { white-space:normal; max-width:210px; }
+td.att-machine { white-space:normal; max-width:150px; }
+.pill.edit { color:var(--accent); }
+tr.is-hidden td { color:var(--muted); }
 .day-nav .day-label { font-weight:600; min-width:150px; text-align:center; font-variant-numeric:tabular-nums; }
 .tl { padding:6px 20px 18px; }
 .tl-row { display:grid; grid-template-columns:200px minmax(0, 1fr) 92px; align-items:center; gap:14px; min-height:40px; }
@@ -411,11 +421,12 @@ const ICONS: Record<string, string> = {
   reports: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 12h6M9 16h6"/></svg>`,
   employees: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19c.8-3 3-4.6 5.5-4.6s4.7 1.6 5.5 4.6"/><path d="M16 5.2a3 3 0 0 1 0 5.6M18 14.6c1.3.6 2.2 1.9 2.6 4.4"/></svg>`,
   machines: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="6" y="3" width="12" height="18" rx="2"/><rect x="9" y="6" width="6" height="4" rx="1"/><path d="M12 13.5c-1.5 0-2.5 1.2-2.5 2.6v1.4M14.5 17.5v-1.4c0-.6-.2-1.2-.5-1.6" stroke-linecap="round"/></svg>`,
+  attendance: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/><path d="M10 16.5l4.5-4.5 1.5 1.5-4.5 4.5H10z"/></svg>`,
   history: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 1 0 2.4-5.7L4 8.5"/><path d="M4 4v4.5h4.5M12 8v4.5l3 1.8"/></svg>`,
 };
 
 const NAV: Array<[string, string]> = [
-  ["overview", "Overview"], ["reports", "Reports"], ["employees", "Employees"], ["machines", "Machines"], ["history", "Sync history"],
+  ["overview", "Overview"], ["attendance", "Attendance Edit"], ["reports", "Reports"], ["employees", "Employees"], ["machines", "Machines"], ["history", "Sync history"],
 ];
 
 export function appPage(auth: AuthContext): string {
@@ -470,6 +481,39 @@ export function appPage(auth: AuthContext): string {
       </div>
     </section>
 
+    <!-- ============================== Attendance edit -->
+    <section class="page" id="page-attendance" hidden>
+      <div class="page-head">
+        <div><h1>Attendance Edit</h1><p>Fix a missing or wrong punch before you download the report. The machine's punches are never changed: the times you set replace Time In and Time Out in the Excel, and every change is listed on its Manual Edits sheet.</p></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <div class="att-filters">
+            <select class="input input-sm" id="a_scope" aria-label="Machine or group"><option value="">All machines</option></select>
+            <select class="input input-sm" id="a_show" aria-label="Which employees to show">
+              <option value="problems">Needs attention</option>
+              <option value="all">Everyone</option>
+              <option value="missing_out">No check-out</option>
+              <option value="absent">No punches</option>
+              <option value="edited">Edited</option>
+            </select>
+            <span class="muted" id="a_counts"></span>
+          </div>
+          <div class="day-nav">
+            <button class="btn btn-ghost btn-sm" id="a_prev" type="button" aria-label="Previous day">&#8249;</button>
+            <span class="day-label" id="a_label"></span>
+            <button class="btn btn-ghost btn-sm" id="a_next" type="button" aria-label="Next day">&#8250;</button>
+            <input class="input input-sm" id="a_date" type="date" aria-label="Choose a day" style="width:auto">
+          </div>
+        </div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Employee</th><th>Machine</th><th>Punches on machine</th><th>Time In</th><th>Time Out</th><th class="num">Hours</th><th>Status</th><th></th></tr></thead>
+          <tbody id="a_rows"></tbody>
+        </table></div>
+      </div>
+      <div class="error-text" id="a_msg" style="margin-top:10px"></div>
+    </section>
+
     <!-- ============================== Reports -->
     <section class="page" id="page-reports" hidden>
       <div class="page-head">
@@ -478,7 +522,7 @@ export function appPage(auth: AuthContext): string {
       </div>
       <div class="stack">
         <div class="panel">
-          <div class="panel-head"><div><h2>Scheduled reports</h2><p>Each file has one sheet per machine group, and one per machine that is not in a group (Time In, Time Out, Hours Worked), plus every punch. It's built when you download it, so late punches are included.</p></div></div>
+          <div class="panel-head"><div><h2>Scheduled reports</h2><p>Each file has one sheet per machine group, and one per machine that is not in a group (Time In, Time Out, Hours Worked), plus every punch. It's built when you download it, so late punches and changes made on Attendance Edit are included.</p></div></div>
           <div class="table-wrap"><table>
             <thead><tr><th>Period</th><th>Status</th><th class="num">Machines synced</th><th class="num">Employees</th><th class="num">Punches</th><th>Ready</th><th>Note</th><th></th></tr></thead>
             <tbody id="r_rows"></tbody>
@@ -508,7 +552,7 @@ export function appPage(auth: AuthContext): string {
       <div class="panel">
         <div class="table-wrap" style="margin-top:0;border-top:0;border-radius:12px">
           <table>
-            <thead><tr><th class="num">User ID</th><th>Name</th><th>Department</th><th>Machine or group</th><th>Name from</th><th>Last punch</th><th></th></tr></thead>
+            <thead><tr><th class="num">User ID</th><th>Name</th><th>Department</th><th>Machine</th><th>In reports</th><th>Name from</th><th>Last punch</th><th></th></tr></thead>
             <tbody id="e_rows"></tbody>
           </table>
         </div>
@@ -559,7 +603,7 @@ export function appPage(auth: AuthContext): string {
         </div>
 
         <div class="panel">
-          <div class="panel-head"><div><h2>Machine groups</h2><p>Group machines that the same people use with the same user IDs, for example two machines in one office. A group is one sheet in the Excel report. A machine without a group has its own sheet, and ID 2 on it is a different person from ID 2 on any other machine.</p></div></div>
+          <div class="panel-head"><div><h2>Machine groups</h2><p>A group puts several machines on one sheet of the Excel report. It only combines them: each machine keeps its own employees, so ID 2 on one machine and ID 2 on another stay two separate rows. Nothing is merged, copied or removed. A machine without a group gets its own sheet.</p></div></div>
           <div class="panel-body"${manageOnly}>
             <div class="form-row cols-2">
               <div class="field"><label for="g_name">New group name</label><input class="input" id="g_name" placeholder="e.g. PIA Office" maxlength="40"></div>
@@ -673,7 +717,7 @@ function confirmDialog(title, content, okLabel, onConfirm) {
 }
 
 /* ---------- navigation */
-var PAGES = ["overview", "reports", "employees", "machines", "history"];
+var PAGES = ["overview", "attendance", "reports", "employees", "machines", "history"];
 function showPage() {
   var id = (location.hash || "#overview").slice(1);
   if (PAGES.indexOf(id) < 0) id = "overview";
@@ -858,56 +902,74 @@ document.getElementById("x_go").addEventListener("click", function () {
 /* ---------- employees */
 var empEditing = false;
 var empData = [];
+var empEditingId = null;
 function cellInput(value, placeholder, maxLength, label) {
   var i = el("input", "input input-sm");
   i.value = value || ""; i.placeholder = placeholder || ""; i.maxLength = maxLength; i.setAttribute("aria-label", label);
   return i;
 }
+function empKey(e) { return e.device_id + "|" + e.user_id; }
 async function loadEmployees() {
   if (empEditing) return; // never wipe what someone is typing
   var data = await api("GET", "/api/employees");
   empData = data.employees;
   document.getElementById("count_employees").textContent = data.total || "";
-  setText("e_sub", data.total + " employee" + (data.total === 1 ? "" : "s") +
-    (data.unnamed ? ", " + data.unnamed + " without a name" : "") +
-    ". Names are read from the machine on every sync." +
-    (CAN_MANAGE ? " Type a name to override it; clear it to use the machine's name again." : ""));
+  var parts = [data.total + " employee" + (data.total === 1 ? "" : "s") + " in reports"];
+  if (data.hidden) parts.push(data.hidden + " hidden from reports");
+  if (data.unnamed) parts.push(data.unnamed + " without a name");
+  setText("e_sub", parts.join(", ") + ". Each user ID belongs to its machine, so ID 2 on two machines is two people." +
+    (data.on_deactivated ? " " + data.on_deactivated + " on deactivated machines are not listed." : "") +
+    (CAN_MANAGE ? " Type a name to override the machine's name; clear it to use the machine's name again." : ""));
   renderEmployees();
-}
-var empEditingId = null;
-function empKey(e) { return e.scope_id + "|" + e.user_id; }
-function scopeCell(e) {
-  var c = el("td", "muted");
-  c.appendChild(document.createTextNode(e.scope_name));
-  if (e.scope_kind === "group") c.appendChild(el("span", "sub-id", "Group"));
-  return c;
 }
 function renderEmployees() {
   var q = document.getElementById("e_search").value.trim().toLowerCase();
   var tbody = document.getElementById("e_rows");
   tbody.textContent = "";
   var list = empData.filter(function (e) {
-    return !q || (e.user_id + " " + e.name + " " + (e.machine_name || "") + " " + e.department + " " + e.scope_name).toLowerCase().indexOf(q) >= 0;
+    return !q || (e.user_id + " " + e.name + " " + (e.machine_name || "") + " " + e.department + " " + e.machine + " " + (e.group || "")).toLowerCase().indexOf(q) >= 0;
   });
-  if (!empData.length) { emptyRow(tbody, 7, "No employees yet. They appear after the first sync."); return; }
-  if (!list.length) { emptyRow(tbody, 7, "No employee matches \u201c" + q + "\u201d."); return; }
+  if (!empData.length) { emptyRow(tbody, 8, "No employees yet. They appear after the first sync."); return; }
+  if (!list.length) { emptyRow(tbody, 8, "No employee matches \u201c" + q + "\u201d."); return; }
   list.forEach(function (e) { tbody.appendChild(empKey(e) === empEditingId ? editRow(e) : viewRow(e)); });
 }
+function machineCell(e) {
+  var c = el("td", "muted");
+  c.appendChild(document.createTextNode(e.machine));
+  if (e.group) c.appendChild(el("span", "sub-id", "Group: " + e.group));
+  return c;
+}
+function inReportsCell(e) {
+  var c = el("td");
+  c.appendChild(el("span", "pill " + (e.in_reports ? "ok" : "idle"), e.in_reports ? "Yes" : "Hidden"));
+  return c;
+}
+async function setInReports(e, on) {
+  try {
+    await api("PUT", "/api/employees/" + e.device_id + "/" + encodeURIComponent(e.user_id), { in_reports: on });
+    toast((e.name || "ID " + e.user_id) + (on ? " is back in reports" : " is hidden from reports"));
+    await loadEmployees();
+  } catch (err) { setText("e_msg", err.message); }
+}
 function viewRow(e) {
-  var tr = el("tr");
+  var tr = el("tr", e.in_reports ? null : "is-hidden");
   tr.appendChild(td(e.user_id, "num"));
   var name = el("td");
   if (e.name) name.appendChild(el("span", null, e.name)); else name.appendChild(el("span", "pill warn", "Needs a name"));
   tr.appendChild(name);
   tr.appendChild(td(e.department, e.department ? "" : "muted"));
-  tr.appendChild(scopeCell(e));
+  tr.appendChild(machineCell(e));
+  tr.appendChild(inReportsCell(e));
   tr.appendChild(td(e.name_edited ? "Edited here" : (e.machine_name ? "Machine" : ""), "muted"));
   tr.appendChild(td(punchTime(e.last_punch), "muted"));
   var actions = el("td", "actions");
-  if (CAN_MANAGE) actions.appendChild(btn("Edit", "btn-ghost", function () {
-    empEditingId = empKey(e); empEditing = true; renderEmployees();
-    var f = document.querySelector("#e_rows input"); if (f) f.focus();
-  }));
+  if (CAN_MANAGE) {
+    actions.appendChild(btn(e.in_reports ? "Hide" : "Show", "btn-quiet", function () { setInReports(e, !e.in_reports); }));
+    actions.appendChild(btn("Edit", "btn-ghost", function () {
+      empEditingId = empKey(e); empEditing = true; renderEmployees();
+      var f = document.querySelector("#e_rows input"); if (f) f.focus();
+    }));
+  }
   tr.appendChild(actions);
   return tr;
 }
@@ -920,7 +982,8 @@ function editRow(e) {
   if (e.machine_name) c1.appendChild(el("span", "sub-id", "On the machine: " + e.machine_name));
   tr.appendChild(c1);
   var c2 = el("td"); c2.appendChild(deptIn); tr.appendChild(c2);
-  tr.appendChild(scopeCell(e));
+  tr.appendChild(machineCell(e));
+  tr.appendChild(inReportsCell(e));
   tr.appendChild(td(e.name_edited ? "Edited here" : (e.machine_name ? "Machine" : ""), "muted"));
   tr.appendChild(td(punchTime(e.last_punch), "muted"));
   function done() { empEditingId = null; empEditing = false; }
@@ -930,7 +993,7 @@ function editRow(e) {
     // Same as the machine's name (or empty): keep following the machine.
     if (e.machine_name && name === e.machine_name) name = "";
     try {
-      await api("PUT", "/api/employees/" + e.scope_id + "/" + encodeURIComponent(e.user_id), { name: name, department: deptIn.value });
+      await api("PUT", "/api/employees/" + e.device_id + "/" + encodeURIComponent(e.user_id), { name: name, department: deptIn.value });
       setText("e_msg", "");
       done();
       toast("Saved " + (name || e.machine_name || "user " + e.user_id));
@@ -945,6 +1008,129 @@ function editRow(e) {
   return tr;
 }
 document.getElementById("e_search").addEventListener("input", function () { if (!empEditing) renderEmployees(); });
+
+/* ---------- attendance edit */
+var attDate = null, attToday = null, attData = null, attEditing = null;
+var STATUS = {
+  ok: ["OK", "ok"], missing_out: ["No check-out", "warn"], absent: ["No punches", "idle"], edited: ["Edited", "edit"]
+};
+function hhmm(t) { return t ? t.slice(0, 5) : ""; }
+function ampm(t) {
+  if (!t) return DASH;
+  var h = Number(t.slice(0, 2)), m = t.slice(3, 5);
+  return ((h + 11) % 12 + 1) + ":" + m + (h < 12 ? " AM" : " PM");
+}
+function hoursText(a, b) { return (a && b && b > a) ? dur(minutes(b) - minutes(a)) : ""; }
+async function loadAttendance() {
+  if (attEditing) return;
+  var scope = document.getElementById("a_scope").value;
+  var data = await api("GET", "/api/attendance?" + (attDate ? "date=" + attDate + "&" : "") + (scope ? "scope=" + encodeURIComponent(scope) : ""));
+  attData = data; attDate = data.date; attToday = data.today;
+  document.getElementById("a_date").value = data.date;
+  document.getElementById("a_date").max = data.today;
+  setText("a_label", (data.date === data.today ? "Today, " : "") + fmtDayShort(data.date) + (data.date === data.today ? "" : " " + parseDay(data.date).getFullYear()));
+  document.getElementById("a_next").disabled = data.date >= data.today;
+  var sel = document.getElementById("a_scope"), keep = sel.value;
+  while (sel.options.length > 1) sel.remove(1);
+  data.scopes.forEach(function (s) { var o = el("option", null, s.name + (s.kind === "group" ? " (group)" : "")); o.value = s.id; sel.appendChild(o); });
+  sel.value = keep; if (sel.value !== keep) sel.value = "";
+  var c = data.counts;
+  setText("a_counts", c.total + " employees \u00b7 " + c.missing_out + " no check-out \u00b7 " + c.absent + " no punches \u00b7 " + c.edited + " edited");
+  renderAttendance();
+}
+function renderAttendance() {
+  var tbody = document.getElementById("a_rows");
+  tbody.textContent = "";
+  if (!attData) return;
+  var show = document.getElementById("a_show").value;
+  var list = attData.rows.filter(function (r) {
+    if (show === "all") return true;
+    if (show === "problems") return r.status !== "ok";
+    return r.status === show;
+  });
+  tbody.closest(".table-wrap").scrollLeft = 0;
+  if (!attData.rows.length) { emptyRow(tbody, 8, "No employees yet. They appear after the first sync."); return; }
+  if (!list.length) { emptyRow(tbody, 8, show === "problems" ? "Nothing to fix on this day: everyone has a check-in and a check-out." : "No employees in this view."); return; }
+  list.forEach(function (r) { tbody.appendChild(attKey(r) === attEditing ? attEditRow(r) : attViewRow(r)); });
+}
+function attKey(r) { return r.device_id + "|" + r.user_id; }
+function attCommon(tr, r) {
+  var n = el("td"); n.appendChild(document.createTextNode(r.name));
+  var sub = (r.name === "ID " + r.user_id ? "" : "ID " + r.user_id) + (r.hidden ? (r.name === "ID " + r.user_id ? "" : " \u00b7 ") + "hidden from reports" : "");
+  if (sub) n.appendChild(el("span", "sub-id", sub));
+  tr.appendChild(n);
+  var m = el("td", "muted att-machine"); m.appendChild(document.createTextNode(r.machine)); if (r.group) m.appendChild(el("span", "sub-id", "Group: " + r.group));
+  tr.appendChild(m);
+  tr.appendChild(td(r.punches.length ? r.punches.map(ampm).join(", ") : "", "punch-list"));
+}
+function attViewRow(r) {
+  var tr = el("tr");
+  attCommon(tr, r);
+  tr.appendChild(td(r.time_in ? ampm(r.time_in) : ""));
+  tr.appendChild(td(r.time_out ? ampm(r.time_out) : ""));
+  tr.appendChild(td(hoursText(r.time_in, r.time_out), "num"));
+  var st = STATUS[r.status] || ["", "idle"];
+  var sc = el("td", "att-status"); sc.appendChild(el("span", "pill " + st[1], st[0]));
+  if (r.edit) {
+    sc.appendChild(el("span", "sub-id", "by " + r.edit.edited_by + (r.edit.note ? " \u00b7 " + r.edit.note : "")));
+  }
+  tr.appendChild(sc);
+  var a = el("td", "actions");
+  if (CAN_MANAGE) a.appendChild(btn(r.edit ? "Change" : "Edit time", "btn-ghost", function () {
+    attEditing = attKey(r); renderAttendance();
+    var f = document.querySelector("#a_rows input"); if (f) f.focus();
+  }));
+  tr.appendChild(a);
+  return tr;
+}
+function timeInput(value, label) {
+  var i = el("input", "input input-sm input-time"); i.type = "time"; i.value = hhmm(value); i.setAttribute("aria-label", label);
+  return i;
+}
+function attEditRow(r) {
+  var tr = el("tr", "editing");
+  attCommon(tr, r);
+  var tin = timeInput(r.time_in, "Time In for " + r.name);
+  var tout = timeInput(r.time_out, "Time Out for " + r.name);
+  var c1 = el("td"); c1.appendChild(tin); tr.appendChild(c1);
+  var c2 = el("td"); c2.appendChild(tout); tr.appendChild(c2);
+  var hrs = td(hoursText(r.time_in, r.time_out), "num"); tr.appendChild(hrs);
+  function upd() { hrs.textContent = hoursText(tin.value, tout.value) || DASH; }
+  tin.addEventListener("input", upd); tout.addEventListener("input", upd);
+  var note = el("input", "input input-sm input-note"); note.placeholder = "Reason (optional)"; note.maxLength = 200;
+  note.value = r.edit && r.edit.note ? r.edit.note : ""; note.setAttribute("aria-label", "Reason for the change");
+  var c3 = el("td"); c3.appendChild(note); tr.appendChild(c3);
+  var path = "/api/attendance/" + r.device_id + "/" + encodeURIComponent(r.user_id) + "/" + attDate;
+  function done() { attEditing = null; }
+  var save = btn("Save", "btn-primary", async function () {
+    if (tin.value && tout.value && tout.value <= tin.value) { setText("a_msg", "Time Out must be after Time In."); return; }
+    save.disabled = true;
+    try {
+      await api("PUT", path, { time_in: tin.value, time_out: tout.value, note: note.value });
+      setText("a_msg", ""); done(); toast("Saved the times for " + r.name);
+      await loadAttendance();
+    } catch (err) { setText("a_msg", err.message); save.disabled = false; }
+  });
+  var cancel = btn("Cancel", "btn-quiet", function () { done(); setText("a_msg", ""); renderAttendance(); });
+  var a = el("td", "actions");
+  var box = el("div", "stack-btns");
+  if (r.edit) box.appendChild(btn("Use machine", "btn-quiet", async function () {
+    try { await api("DELETE", path); setText("a_msg", ""); done(); toast(r.name + " is back to the machine's punches"); await loadAttendance(); }
+    catch (err) { setText("a_msg", err.message); }
+  }));
+  box.appendChild(save); box.appendChild(cancel); a.appendChild(box);
+  [tin, tout, note].forEach(function (x) {
+    x.addEventListener("keydown", function (ev) { if (ev.key === "Enter") save.click(); if (ev.key === "Escape") cancel.click(); });
+  });
+  tr.appendChild(a);
+  return tr;
+}
+function attGo(date) { attEditing = null; attDate = date; setText("a_msg", ""); loadAttendance().catch(function (e) { toast(e.message); }); }
+document.getElementById("a_prev").addEventListener("click", function () { attGo(addDays(attDate, -1)); });
+document.getElementById("a_next").addEventListener("click", function () { if (attDate < attToday) attGo(addDays(attDate, 1)); });
+document.getElementById("a_date").addEventListener("change", function () { if (this.value) attGo(this.value > attToday ? attToday : this.value); });
+document.getElementById("a_scope").addEventListener("change", function () { attGo(attDate); });
+document.getElementById("a_show").addEventListener("change", function () { if (!attEditing) renderAttendance(); });
 
 /* ---------- machines: connectors */
 async function downloadInstaller(connectorId, token) {
@@ -1163,7 +1349,7 @@ function groupCell(d) {
   return c;
 }
 function refreshAfterGrouping() {
-  return Promise.all([quiet(loadDevices()), quiet(loadEmployees()), quiet(loadOverview())]);
+  return Promise.all([quiet(loadDevices()), quiet(loadEmployees()), quiet(loadOverview()), quiet(loadAttendance())]);
 }
 function renderGroups() {
   var tbody = document.getElementById("g_rows");
@@ -1330,7 +1516,7 @@ document.getElementById("logout").addEventListener("click", async function () {
 function quiet(p) { return p.catch(function (e) { if (e.message !== "Signed out") console.warn(e); }); }
 function refreshMachines() { return Promise.all([quiet(loadConnectors()), quiet(loadDevices()), quiet(loadStatus())]); }
 function refreshAll() {
-  return Promise.all([quiet(loadStatus()), quiet(loadOverview()), quiet(loadReports()), quiet(loadEmployees()),
+  return Promise.all([quiet(loadStatus()), quiet(loadOverview()), quiet(loadAttendance()), quiet(loadReports()), quiet(loadEmployees()),
     quiet(loadConnectors()), quiet(loadDevices()), quiet(loadJobs())]);
 }
 showPage();
@@ -1339,5 +1525,6 @@ setInterval(function () {
   if (document.hidden) return;
   quiet(loadStatus()); quiet(loadJobs()); quiet(loadReports()); quiet(loadDevices()); quiet(loadConnectors());
   if (ovDate === ovToday) quiet(loadOverview());
+  if (!document.getElementById("page-attendance").hidden) quiet(loadAttendance());
 }, 20000);
 </script>`;

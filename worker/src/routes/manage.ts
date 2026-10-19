@@ -250,6 +250,7 @@ export async function deleteDevice(request: Request, env: Env, id: string): Prom
           .bind(body.move_to, id),
         // Its employees (names, departments) move too, unless the target already has that user ID.
         env.DB.prepare("UPDATE OR IGNORE employees SET device_id = ? WHERE device_id = ?").bind(body.move_to, id),
+        env.DB.prepare("UPDATE OR IGNORE attendance_edits SET device_id = ? WHERE device_id = ?").bind(body.move_to, id),
       );
       moved = count;
     } else if (body.delete_punches !== true) {
@@ -259,6 +260,7 @@ export async function deleteDevice(request: Request, env: Env, id: string): Prom
   statements.push(
     env.DB.prepare("DELETE FROM attendance_logs WHERE device_id = ?").bind(id),
     env.DB.prepare("DELETE FROM employees WHERE device_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM attendance_edits WHERE device_id = ?").bind(id),
     env.DB.prepare("DELETE FROM sync_jobs WHERE device_id = ?").bind(id),
     env.DB.prepare("DELETE FROM devices WHERE id = ? AND company_id = ?").bind(id, auth.companyId),
   );

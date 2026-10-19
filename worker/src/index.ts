@@ -13,6 +13,7 @@ import { overview } from "./routes/overview";
 import { claimJob, completeJob, connectorConfig, jobProgress, uploadLogs, uploadUsers } from "./routes/connector";
 import { listEmployees, saveEmployee } from "./routes/employees";
 import { createGroup, deleteGroup, listGroups, renameGroup, setDeviceGroup } from "./routes/groups";
+import { dayAttendance, deleteAttendanceEdit, saveAttendanceEdit } from "./routes/attendance";
 import { downloadReport, exportRange, listReports } from "./routes/reports";
 import { runScheduler } from "./scheduler";
 import { appPage, loginPage, signupPage } from "./pages";
@@ -30,6 +31,7 @@ const R_JOB_USERS = new RegExp(`^/api/connector/jobs/${ID}/users$`);
 const R_EMPLOYEE = new RegExp(`^/api/employees/${ID}/([^/]{1,100})$`);
 const R_GROUP = new RegExp(`^/api/groups/${ID}$`);
 const R_DEVICE_GROUP = new RegExp(`^/api/devices/${ID}/group$`);
+const R_ATT_EDIT = new RegExp(`^/api/attendance/${ID}/([^/]{1,100})/(\\d{4}-\\d{2}-\\d{2})$`);
 const R_CONNECTOR_PACKAGE = new RegExp(`^/api/connectors/${ID}/package$`);
 const R_DEVICE = new RegExp(`^/api/devices/${ID}$`);
 const R_CONNECTOR = new RegExp(`^/api/connectors/${ID}$`);
@@ -82,6 +84,9 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (method === "PUT" && (m = R_GROUP.exec(pathname))) return renameGroup(request, env, m[1]);
   if (method === "DELETE" && (m = R_GROUP.exec(pathname))) return deleteGroup(request, env, m[1]);
   if (method === "PUT" && (m = R_DEVICE_GROUP.exec(pathname))) return setDeviceGroup(request, env, m[1]);
+  if (pathname === "/api/attendance" && method === "GET") return dayAttendance(request, env);
+  if (method === "PUT" && (m = R_ATT_EDIT.exec(pathname))) return saveAttendanceEdit(request, env, m[1], safeDecode(m[2]), m[3]);
+  if (method === "DELETE" && (m = R_ATT_EDIT.exec(pathname))) return deleteAttendanceEdit(request, env, m[1], safeDecode(m[2]), m[3]);
 
   // ---- ZKT Connector API (Bearer token)
   if (pathname === "/api/connector/config" && method === "GET") return connectorConfig(request, env);

@@ -21,33 +21,20 @@ export async function overview(request: Request, env: Env): Promise<Response> {
   ).bind(auth.companyId, `${date} 00:00:00`, `${addDays(date, 1)} 00:00:00`)
     .all<{ device_id: string; user_id: string; time: string }>();
 
-  // A person = user ID within a machine (or within the machine's group).
-  const { scopes, byId, scopeOfDevice } = await loadScopes(env, auth.companyId);
-  const people = await loadPeople(env, auth.companyId, scopeOfDevice);
-  const { results: everPunched } = await env.DB.prepare(
-    "SELECT DISTINCT device_id, device_user_id FROM attendance_logs WHERE company_id = ?",
-  ).bind(auth.companyId).all<{ device_id: string; device_user_id: string }>();
-  for (const r of everPunched ?? []) {
-    const scope = scopeOfDevice.get(r.device_id);
-    if (!scope) continue;
-    const key = personKey(scope.id, r.device_user_id);
-    if (!people.has(key)) {
-      people.set(key, { scopeId: scope.id, userId: r.device_user_id, name: "", machineName: null, department: "", edited: false, active: true });
-    }
-  }
-  const showWhere = scopes.length > 1;
-  const where = (scopeId: string) => (showWhere ? byId.get(scopeId)?.name ?? null : null);
+  // A person = user ID on one machine. Same roster as the Employees page and the report.
+  const { machines } = await loadScopes(env, auth.companyId);
+  const people = await loadPeople(env, auth.companyId, machines);
+  const showWhere = [...machines.values()].filter((m) => m.active).length > 1;
+  const where = (deviceId: string) => (showWhere ? machines.get(deviceId)?.name ?? null : null);
 
   const sync = await env.DB.prepare(
     "SELECT MAX(last_sync_at) AS last_sync, COUNT(*) AS machines FROM devices WHERE company_id = ? AND is_active = 1",
   ).bind(auth.companyId).first<{ last_sync: string | null; machines: number }>();
 
-  const byPerson = new Map<string, { scopeId: string; userId: string; times: string[] }>();
+  const byPerson = new Map<string, { deviceId: string; userId: string; times: string[] }>();
   for (const p of punches ?? []) {
-    const scope = scopeOfDevice.get(p.device_id);
-    if (!scope) continue;
-    const key = personKey(scope.id, p.user_id);
-    const entry = byPerson.get(key) ?? { scopeId: scope.id, userId: p.user_id, times: [] };
+    const key = personKey(p.device_id, p.user_id);
+    const entry = byPerson.get(key) ?? { deviceId: p.device_id, userId: p.user_id, times: [] };
     entry.times.push(p.time);
     byPerson.set(key, entry);
   }
@@ -56,13 +43,13 @@ export async function overview(request: Request, env: Env): Promise<Response> {
     e.times.sort();
     return {
       user_id: e.userId, name: info?.name || null, department: info?.department || null,
-      where: where(e.scopeId), punches: e.times,
+      where: where(e.deviceId), punches: e.times,
     };
   });
   present.sort((a, b) => a.punches[0].localeCompare(b.punches[0]) || a.user_id.localeCompare(b.user_id));
   const absent = [...people]
-    .filter(([key, p]) => p.active && !byPerson.has(key) && byId.get(p.scopeId)?.active)
-    .map(([, p]) => ({ user_id: p.userId, name: p.name || null, where: where(p.scopeId) }))
+    .filter(([key, p]) => p.inRoster && !byPerson.has(key))
+    .map(([, p]) => ({ user_id: p.userId, name: p.name || null, where: where(p.deviceId) }))
     .sort((a, b) => (a.name ?? "~").localeCompare(b.name ?? "~") || a.user_id.localeCompare(b.user_id));
 
   return json({
